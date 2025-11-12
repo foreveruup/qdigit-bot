@@ -585,7 +585,15 @@ RULES:
             logger.warning(f"Google Sheets недоступен или не настроен: {e}")
 
     def extract_client_info(self, text: str, lang_code: str) -> dict:
+        """
+        Умное извлечение данных: работает и с метками (Имя:, Телефон:),
+        и с простым вводом строками (Имир / Компания / Телефон / Задача)
+        """
         info = {}
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        low_text = text.lower()
+
+        # 1) ПОДДЕРЖКА МЕТОК (старый вариант)
         keywords = {
             'ru': {'name': ['имя:', 'name:'], 'company': ['компания:', 'company:'],
                    'phone': ['телефон:', 'phone:'], 'task': ['задача:', 'задач']},
@@ -594,17 +602,46 @@ RULES:
             'en': {'name': ['name:'], 'company': ['company:'], 'phone': ['phone:'], 'task': ['task:']}
         }
         kw = keywords.get(lang_code, keywords['en'])
-        for raw_line in text.split('\n'):
-            line = raw_line.strip()
-            low = line.lower()
+
+        for raw_line in lines:
+            low = raw_line.lower()
             if any(k in low for k in kw['name']):
-                info['name'] = line.split(':', 1)[1].strip()
+                info['name'] = raw_line.split(':', 1)[1].strip()
             elif any(k in low for k in kw['company']):
-                info['company'] = line.split(':', 1)[1].strip()
+                info['company'] = raw_line.split(':', 1)[1].strip()
             elif any(k in low for k in kw['phone']):
-                info['phone'] = line.split(':', 1)[1].strip()
+                info['phone'] = raw_line.split(':', 1)[1].strip()
             elif any(k in low for k in kw['task']):
-                info['bot_type'] = line.split(':', 1)[1].strip()
+                info['bot_type'] = raw_line.split(':', 1)[1].strip()
+
+        # Если метки найдены — сразу возвращаем
+        if info.get("name") and info.get("phone") and info.get("bot_type"):
+            return info
+
+        # 2) АВТО-ПАРСИНГ БЕЗ МЕТОК
+        # Формат: имя / компания / телефон / задача
+        if len(lines) >= 3:
+            # Имя (1 строка)
+            if "name" not in info:
+                info["name"] = lines[0]
+
+            # Компания (2 строка)
+            if "company" not in info and len(lines) >= 2:
+                info["company"] = lines[1]
+
+            # Телефон — ищем где есть цифры
+            phone_line = None
+            for l in lines:
+                if "+" in l or any(c.isdigit() for c in l):
+                    phone_line = l
+                    break
+            if phone_line and "phone" not in info:
+                info["phone"] = phone_line
+
+            # Задача = последняя строка
+            if "bot_type" not in info and len(lines) >= 3:
+                info["bot_type"] = lines[-1]
+
         return info
 
     # === ОБРАБОТКА СООБЩЕНИЙ ===
