@@ -548,17 +548,39 @@ RULES:
                 from google.oauth2.service_account import Credentials
 
                 creds_dict = json.loads(creds_json)
-                scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+                scopes = [
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive",
+                ]
                 credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
                 gc = gspread.authorize(credentials)
                 sh = gc.open(sheet_name)
-                ws = sh.worksheet(worksheet) if worksheet in [w.title for w in sh.worksheets()] else sh.add_worksheet(title=worksheet, rows=1000, cols=10)
 
-                headers = ["recorded_at", "name", "company", "phone", "bot_type", "status"]
-                if ws.row_count == 0 or ws.acell("A1").value is None:
-                    ws.insert_row(headers, 1)
-                ws.append_row([row.get("recorded_at"), row.get("name"), row.get("company"),
-                               row.get("phone"), row.get("bot_type"), row.get("status", "new")], value_input_option="USER_ENTERED")
+                # Создать лист, если его нет
+                if worksheet not in [w.title for w in sh.worksheets()]:
+                    ws = sh.add_worksheet(title=worksheet, rows=1000, cols=10)
+                else:
+                    ws = sh.worksheet(worksheet)
+
+                # Заголовки (всегда на первой строке)
+                headers = ["Дата", "Имя", "Компания", "Телефон", "Задача", "Источник", "Статус"]
+                first_row = ws.row_values(1)
+                if not first_row or first_row != headers:
+                    ws.update("A1:G1", [headers])
+                    logger.info("🧾 Заголовок таблицы обновлён")
+
+                # Добавляем новую строку
+                ws.append_row([
+                    datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    row.get("name"),
+                    row.get("company"),
+                    row.get("phone"),
+                    row.get("bot_type"),
+                    "WhatsApp",  # можно изменить на Telegram, если будет другой источник
+                    row.get("status", "new"),
+                ], value_input_option="USER_ENTERED")
+
+                logger.info("✅ Добавлено в Google Sheets")
         except Exception as e:
             logger.warning(f"Google Sheets недоступен или не настроен: {e}")
 
@@ -676,9 +698,9 @@ RULES:
 
                 lang_code = self.user_language[chat_id]
 
-                # === Формы клиента
                 field_keywords = ['имя:', 'компания:', 'телефон:', 'name:', 'company:', 'phone:',
                                   'аты:', 'міндет:', 'задач', 'task:']
+
                 if any(k in message_text.lower() for k in field_keywords):
                     client_info = self.extract_client_info(message_text, lang_code)
                     need = []
@@ -700,35 +722,32 @@ RULES:
                             'en': f"Almost there! Missing: {', '.join(need)}.\nSend in one message."
                         }
                         self.send_message(chat_id, ask_messages.get(lang_code, ask_messages['en']))
-                    else:
-                        if self.save_client_data(phone, client_info):
-                            success_messages = {
-                                'ru': ("✅ Записал вас на бесплатную консультацию!\n\n"
-                                       f"👤 Имя: {client_info.get('name')}\n"
-                                       f"🏢 Компания: {client_info.get('company')}\n"
-                                       f"📱 Телефон: {client_info.get('phone')}\n"
-                                       f"🧩 Задача: {client_info.get('bot_type')}\n\n"
-                                       "Свяжемся в ближайшее время. Предпочтительнее звонок или WhatsApp? 🙂"),
-                                'kk': ("✅ Сізді тегін кеңеске жаздым!\n\n"
-                                       f"👤 Аты: {client_info.get('name')}\n"
-                                       f"🏢 Компания: {client_info.get('company')}\n"
-                                       f"📱 Телефон: {client_info.get('phone')}\n"
-                                       f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
-                                       "Жақын арада хабарласамыз. Қоңырау немесе WhatsApp артық па? 🙂"),
-                                'en': ("✅ Scheduled you for a free consultation!\n\n"
-                                       f"👤 Name: {client_info.get('name')}\n"
-                                       f"🏢 Company: {client_info.get('company')}\n"
-                                       f"📱 Phone: {client_info.get('phone')}\n"
-                                       f"🧩 Task: {client_info.get('bot_type')}\n\n"
-                                       "We'll contact you soon. Do you prefer call or WhatsApp? 🙂")
-                            }
-                            self.send_message(chat_id, success_messages.get(lang_code, success_messages['en']))
-                            return
+                        return
 
-                    self.processed_messages.add(message_id)
-                    if receipt_id:
-                        self.delete_notification(receipt_id)
-                    return
+                    # ✅ Сохраняем и не идём дальше к GPT
+                    if self.save_client_data(phone, client_info):
+                        success_messages = {
+                            'ru': ("✅ Записал вас на бесплатную консультацию!\n\n"
+                                   f"👤 Имя: {client_info.get('name')}\n"
+                                   f"🏢 Компания: {client_info.get('company')}\n"
+                                   f"📱 Телефон: {client_info.get('phone')}\n"
+                                   f"🧩 Задача: {client_info.get('bot_type')}\n\n"
+                                   "Наш менеджер свяжется с вами в ближайшее время 🙌"),
+                            'kk': ("✅ Сізді тегін кеңеске жаздым!\n\n"
+                                   f"👤 Аты: {client_info.get('name')}\n"
+                                   f"🏢 Компания: {client_info.get('company')}\n"
+                                   f"📱 Телефон: {client_info.get('phone')}\n"
+                                   f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
+                                   "Менеджер жақын арада хабарласады 🙌"),
+                            'en': ("✅ You’re booked for a free consultation!\n\n"
+                                   f"👤 Name: {client_info.get('name')}\n"
+                                   f"🏢 Company: {client_info.get('company')}\n"
+                                   f"📱 Phone: {client_info.get('phone')}\n"
+                                   f"🧩 Task: {client_info.get('bot_type')}\n\n"
+                                   "Our manager will reach out soon 🙌")
+                        }
+                        self.send_message(chat_id, success_messages.get(lang_code, success_messages['en']))
+                        return
 
                 # === Быстрая маршрутизация
                 quick = self.route_intent(message_text, lang_code)
