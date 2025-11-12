@@ -40,6 +40,9 @@ class WhatsAppBot:
         # Хранилище выбранного языка для каждого чата
         self.user_language = {}  # {chat_id: 'ru'/'kk'/'en'}
 
+        # ✅ НОВОЕ: Память о состоянии формы
+        self.awaiting_form = {}  # {chat_id: True/False} — ожидаем ли заполнение формы
+
         # Системные промпты (RU/KK/EN) — всегда говорить от лица бренда и кратко
         self.system_prompts = {
             'ru': f"""Ты — тёплый и компетентный консультант компании {self.brand} (Казахстан).
@@ -180,7 +183,7 @@ RULES:
         body = (
             "👋 *Здравствуйте!* Вас приветствует компания *{brand}*.\n"
             "👋 *Сәлеметсіз бе!* Сізді *{brand}* компаниясы қарсы алады.\n"
-            "👋 *Hello!* You’re welcomed by *{brand}*.\n\n"
+            "👋 *Hello!* You're welcomed by *{brand}*.\n\n"
             "Пожалуйста, выберите удобный язык общения:\n"
             "Өзіңізге ыңғайлы тілді таңдаңыз:\n"
             "Please choose your language:"
@@ -201,7 +204,7 @@ RULES:
         fallback = (
             f"👋 *Здравствуйте!* Вас приветствует компания *{self.brand}*.\n"
             "👋 *Сәлеметсіз бе!* Сізді *{brand}* компаниясы қарсы алады.\n"
-            "👋 *Hello!* You’re welcomed by *{brand}*.\n\n"
+            "👋 *Hello!* You're welcomed by *{brand}*.\n\n"
             "1️⃣ Русский 🇷🇺\n"
             "2️⃣ Қазақша 🇰🇿\n"
             "3️⃣ English 🇬🇧\n\n"
@@ -221,30 +224,6 @@ RULES:
             logger.error(f"Ошибка отправки кнопок: {e}")
             self.send_message(chat_id, fallback)
             return False
-
-    # (оставляем как утилиту — но больше напрямую не используем)
-    def _send_quick_actions(self, chat_id: str, lang_code: str):
-        """ЛЕГАСИ: отдельные кнопки без приветствия (на всякий случай)."""
-        try:
-            url = f"{self.base_url}/sendInteractiveButtonsReply/{self.api_token}"
-            actions = {
-                "chatId": chat_id,
-                "header": " ",
-                "body": {
-                    'ru': "Выберите действие:",
-                    'kk': "Әрекетті таңдаңыз:",
-                    'en': "Choose an action:"
-                }.get(lang_code, "Choose an action:"),
-                "footer": self.brand,
-                "buttons": [
-                    {"buttonId": "get_price", "buttonText": "📄 Прайс"},
-                    {"buttonId": "book_consult", "buttonText": "📞 Консультация"},
-                    {"buttonId": "short_services", "buttonText": "💬 Наши услуги"}
-                ]
-            }
-            requests.post(url, json=actions, timeout=10)
-        except Exception as e:
-            logger.error(f"Ошибка отправки быстрых действий: {e}")
 
     def set_language(self, chat_id: str, lang_code: str):
         self.user_language[chat_id] = lang_code
@@ -271,35 +250,6 @@ RULES:
                 logger.info(f"Загружено языков: {len(self.user_language)}")
         except Exception as e:
             logger.error(f"Ошибка загрузки языков: {e}")
-
-    # (оставил — вдруг пригодится где-то ещё)
-    def get_welcome_message(self, lang_code: str) -> str:
-        if lang_code == 'ru':
-            return (
-                f"👋 Здравствуйте! Вас приветствует *{self.brand}*.\n"
-                "Мы делаем чат-боты, автоматизацию и сайты для бизнеса в Казахстане.\n\n"
-                "Чем помочь? Выберите:\n"
-                "• 📄 Прайс на услуги\n"
-                "• 📞 Бесплатная консультация\n"
-                "• 💬 Наши услуги"
-            )
-        if lang_code == 'kk':
-            return (
-                f"👋 Сәлеметсіз бе! Сізді *{self.brand}* қарсы алады.\n"
-                "Біз Қазақстандағы бизнеске чат-боттар, автоматтандыру және сайттар жасаймыз.\n\n"
-                "Қалай көмектесейін?\n"
-                "• 📄 Қызметтер прайсы\n"
-                "• 📞 Тегін кеңес\n"
-                "• 💬 Қызметтер"
-            )
-        return (
-            f"👋 Hello! *{self.brand}* here.\n"
-            "We build chatbots, automation and websites for businesses in Kazakhstan.\n\n"
-            "How can we help?\n"
-            "• 📄 Pricing file\n"
-            "• 📞 Free consultation\n"
-            "• 💬 Services overview"
-        )
 
     # === УТИЛИТЫ ===
 
@@ -330,6 +280,8 @@ RULES:
             del self.last_reply[chat_id]
         if chat_id in self.user_language:
             del self.user_language[chat_id]
+        if chat_id in self.awaiting_form:
+            del self.awaiting_form[chat_id]
         logger.info(f"История чата {chat_id} очищена")
 
     def send_message(self, chat_id: str, message: str) -> bool:
@@ -424,14 +376,18 @@ RULES:
             return error_messages.get(lang_code, error_messages['en'])
 
     # === МАРШРУТИЗАЦИЯ ===
-    def route_intent(self, text: str, lang_code: str) -> Optional[str]:
+    def route_intent(self, text: str, lang_code: str, chat_id: str = None) -> Optional[str]:
+        """
+        ✅ ОБНОВЛЕНО: Теперь принимает chat_id для управления состоянием формы
+        """
         t = (text or "").lower().strip()
 
         price_kw = {
             'ru': ["цена", "стоимость", "прайс", "сколько стоит", "прайслист", "прайс-лист", "ценник",
                    "давай", "давайте", "скинь", "скиньте", "пришли", "прайс пожалуйста", "прайс пж", "ок", "окей"],
             'kk': ["баға", "құны", "прайс", "иә", "болсын", "жібер", "жібере сал", "ок"],
-            'en': ["price", "pricing", "cost", "how much", "pricelist", "send price", "ok", "okay", "yes", "share price"]
+            'en': ["price", "pricing", "cost", "how much", "pricelist", "send price", "ok", "okay", "yes",
+                   "share price"]
         }
         if any(k in t for k in price_kw.get(lang_code, [])):
             return "__INTENT_PRICE__"
@@ -445,50 +401,55 @@ RULES:
             note = {
                 'ru': f"Наш номер поддержки: {self.support_phone}\nНапишите в WhatsApp — быстро ответим. 📞",
                 'kk': f"Біздің қолдау нөмірі: {self.support_phone}\nWhatsApp-қа жазыңыз — жылдам жауап береміз. 📞",
-                'en': f"Our support number: {self.support_phone}\nWrite on WhatsApp — we’ll reply quickly. 📞"
+                'en': f"Our support number: {self.support_phone}\nWrite on WhatsApp — we'll reply quickly. 📞"
             }
             return note.get(lang_code, note['en'])
 
         consult_keywords = {
-            'ru': ["записаться", "консультац", "созвон", "перезвон", "запишите меня"],
+            'ru': ["записаться", "консультац", "созвон", "перезвон", "запишите меня", "запишите"],
             'kk': ["жазылу", "кеңес", "қоңырау", "жазыңыз мені"],
             'en': ["schedule", "consultation", "appointment", "call me", "book"]
         }
 
         if any(kw in t for kw in consult_keywords.get(lang_code, [])):
+            # ✅ ВКЛЮЧАЕМ РЕЖИМ ОЖИДАНИЯ ФОРМЫ
+            if chat_id:
+                self.awaiting_form[chat_id] = True
+
             forms = {
                 'ru': (
                     "📞 *Давайте согласуем консультацию!*\n\n"
                     "Наш менеджер свяжется с вами, чтобы обсудить проект и предложить решение под вашу задачу.\n\n"
-                    "Пожалуйста, оставьте несколько данных:\n\n"
-                    "👤 *Имя:* \n"
-                    "🏢 *Компания:* \n"
-                    "📱 *Телефон:* \n"
-                    "🧩 *Кратко опишите задачу:* \n\n"
+                    "Пожалуйста, оставьте несколько данных *в одном сообщении*:\n\n"
+                    "👤 Имя\n"
+                    "🏢 Компания (или прочерк)\n"
+                    "📱 Телефон\n"
+                    "🧩 Кратко опишите задачу\n\n"
                     "_После этого менеджер свяжется в ближайшее время 🙂_"
                 ),
                 'kk': (
                     "📞 *Кеңесті келісейік!*\n\n"
                     "Менеджер сізбен хабарласып, жобаңызды талқылайды және ең тиімді шешімді ұсынады.\n\n"
-                    "Келесі деректерді қалдырыңыз:\n\n"
-                    "👤 *Аты:* \n"
-                    "🏢 *Компания:* \n"
-                    "📱 *Телефон:* \n"
-                    "🧩 *Міндеттің қысқаша сипаттамасы:* \n\n"
+                    "Келесі деректерді *бір хабарламада* қалдырыңыз:\n\n"
+                    "👤 Аты\n"
+                    "🏢 Компания (немесе сызықша)\n"
+                    "📱 Телефон\n"
+                    "🧩 Міндеттің қысқаша сипаттамасы\n\n"
                     "_Біздің менеджер жақын арада хабарласады 🙂_"
                 ),
                 'en': (
-                    "📞 *Let’s arrange your consultation!*\n\n"
+                    "📞 *Let's arrange your consultation!*\n\n"
                     "Our manager will contact you to discuss your project and suggest the best solution.\n\n"
-                    "Please share a few details:\n\n"
-                    "👤 *Name:* \n"
-                    "🏢 *Company:* \n"
-                    "📱 *Phone:* \n"
-                    "🧩 *Briefly describe your task:* \n\n"
+                    "Please share the details *in one message*:\n\n"
+                    "👤 Name\n"
+                    "🏢 Company (or dash)\n"
+                    "📱 Phone\n"
+                    "🧩 Briefly describe your task\n\n"
                     "_Our manager will reach out shortly 🙂_"
                 )
             }
             return forms.get(lang_code, forms['en'])
+
         return None
 
     # === СОХРАНЕНИЕ КЛИЕНТА ===
@@ -577,7 +538,7 @@ RULES:
                     row.get("company"),
                     row.get("phone"),
                     row.get("bot_type"),
-                    "WhatsApp",  # можно изменить на Telegram, если будет другой источник
+                    "WhatsApp",
                     row.get("status", "new"),
                 ], value_input_option="USER_ENTERED")
 
@@ -592,7 +553,6 @@ RULES:
         """
         info = {}
         lines = [l.strip() for l in text.split("\n") if l.strip()]
-        low_text = text.lower()
 
         # 1) ПОДДЕРЖКА МЕТОК (старый вариант)
         keywords = {
@@ -621,8 +581,6 @@ RULES:
 
         # 2) АВТО-ПАРСИНГ БЕЗ МЕТОК
         # Формат: имя / компания / телефон / задача (в любом порядке)
-        import re
-
         phone_pattern = re.compile(r'[\+\d\(\)\-\s]{7,}')  # Ищем телефоны
 
         for idx, line in enumerate(lines):
@@ -683,7 +641,7 @@ RULES:
                 return
 
             if message_data.get('typeMessage') in ('textMessage', 'extendedTextMessage') or \
-               ('textMessageData' in message_data or 'extendedTextMessageData' in message_data):
+                    ('textMessageData' in message_data or 'extendedTextMessageData' in message_data):
 
                 raw_text = self._extract_text(message_data)
                 message_text = self._normalize_text(raw_text)
@@ -727,7 +685,6 @@ RULES:
                         lang_map = {'1': 'ru', '2': 'kk', '3': 'en'}
                         lang_code = lang_map[message_text.strip()]
                         self.set_language(chat_id, lang_code)
-                        # единое приветствие + кнопки
                         self.send_welcome_with_actions(chat_id, lang_code)
                     elif self.is_greeting(message_text):
                         self.send_language_selection(chat_id)
@@ -740,22 +697,17 @@ RULES:
 
                 lang_code = self.user_language[chat_id]
 
-                # НОВЫЙ КОД: проверяем, похоже ли сообщение на данные клиента
-                is_multiline = len([l for l in message_text.split('\n') if l.strip()]) >= 3
-                has_phone = bool(re.search(r'[\+\d\(\)\-\s]{7,}', message_text))
-                field_keywords = ['имя:', 'компания:', 'телефон:', 'name:', 'company:', 'phone:',
-                                  'аты:', 'міндет:', 'задач', 'task:']
-                has_labels = any(k in message_text.lower() for k in field_keywords)
-
-                # Если это многострочное сообщение с телефоном ИЛИ с метками — парсим как данные клиента
-                if (is_multiline and has_phone) or has_labels:
+                # ✅ ПРОВЕРЯЕМ: ОЖИДАЕМ ЛИ ФОРМУ ОТ ЭТОГО ПОЛЬЗОВАТЕЛЯ?
+                if self.awaiting_form.get(chat_id, False):
+                    # Парсим данные
                     client_info = self.extract_client_info(message_text, lang_code)
 
+                    # Проверяем заполненность (только обязательные: имя, телефон, задача)
                     need = []
                     need_messages = {
-                        'ru': {'name': 'Имя', 'company': 'Компания', 'phone': 'Телефон', 'task': 'Задача'},
-                        'kk': {'name': 'Аты', 'company': 'Компания', 'phone': 'Телефон', 'task': 'Міндет'},
-                        'en': {'name': 'Name', 'company': 'Company', 'phone': 'Phone', 'task': 'Task'}
+                        'ru': {'name': 'Имя', 'phone': 'Телефон', 'task': 'Задача'},
+                        'kk': {'name': 'Аты', 'phone': 'Телефон', 'task': 'Міндет'},
+                        'en': {'name': 'Name', 'phone': 'Phone', 'task': 'Task'}
                     }
                     nm = need_messages.get(lang_code, need_messages['en'])
 
@@ -768,9 +720,9 @@ RULES:
 
                     if need:
                         ask_messages = {
-                            'ru': f"Почти всё! Не хватает: {', '.join(need)}.\nПришлите одним сообщением.",
-                            'kk': f"Барлығы дерлік! Жетіспейді: {', '.join(need)}.\nБір хабарламада жіберіңіз.",
-                            'en': f"Almost there! Missing: {', '.join(need)}.\nSend in one message."
+                            'ru': f"Почти всё! Не хватает: *{', '.join(need)}*.\n\nПришлите всё вместе одним сообщением:\nИмя / Компания / Телефон / Задача",
+                            'kk': f"Барлығы дерлік! Жетіспейді: *{', '.join(need)}*.\n\nБәрін бір хабарламада жіберіңіз:\nАты / Компания / Телефон / Міндет",
+                            'en': f"Almost there! Missing: *{', '.join(need)}*.\n\nSend everything in one message:\nName / Company / Phone / Task"
                         }
                         self.send_message(chat_id, ask_messages.get(lang_code, ask_messages['en']))
                         self.processed_messages.add(message_id)
@@ -778,21 +730,24 @@ RULES:
                             self.delete_notification(receipt_id)
                         return
 
+                    # ✅ ВСЁ ЗАПОЛНЕНО — СОХРАНЯЕМ
+                    self.awaiting_form[chat_id] = False  # Отключаем режим ожидания
+
                     if self.save_client_data(phone, client_info):
                         success_messages = {
-                            'ru': ("✅ Записал вас на бесплатную консультацию!\n\n"
+                            'ru': ("✅ *Записал вас на бесплатную консультацию!*\n\n"
                                    f"👤 Имя: {client_info.get('name')}\n"
                                    f"🏢 Компания: {client_info.get('company')}\n"
                                    f"📱 Телефон: {client_info.get('phone')}\n"
                                    f"🧩 Задача: {client_info.get('bot_type')}\n\n"
                                    "Наш менеджер свяжется с вами в ближайшее время 🙌"),
-                            'kk': ("✅ Сізді тегін кеңеске жаздым!\n\n"
+                            'kk': ("✅ *Сізді тегін кеңеске жаздым!*\n\n"
                                    f"👤 Аты: {client_info.get('name')}\n"
                                    f"🏢 Компания: {client_info.get('company')}\n"
                                    f"📱 Телефон: {client_info.get('phone')}\n"
                                    f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
                                    "Менеджер жақын арада хабарласады 🙌"),
-                            'en': ("✅ You're booked for a free consultation!\n\n"
+                            'en': ("✅ *You're booked for a free consultation!*\n\n"
                                    f"👤 Name: {client_info.get('name')}\n"
                                    f"🏢 Company: {client_info.get('company')}\n"
                                    f"📱 Phone: {client_info.get('phone')}\n"
@@ -805,8 +760,8 @@ RULES:
                             self.delete_notification(receipt_id)
                         return
 
-                # === Быстрая маршрутизация
-                quick = self.route_intent(message_text, lang_code)
+                # === Быстрая маршрутизация (ДОБАВЛЕН chat_id)
+                quick = self.route_intent(message_text, lang_code, chat_id)
                 if quick:
                     if quick == "__INTENT_PRICE__":
                         self._send_price(chat_id, lang_code)
@@ -852,35 +807,38 @@ RULES:
                     lang = self.user_language.get(chat_id, 'ru')
                     self._send_price(chat_id, lang)
                 elif selected_button == 'book_consult':
+                    # ✅ ВКЛЮЧАЕМ РЕЖИМ ОЖИДАНИЯ ФОРМЫ
+                    self.awaiting_form[chat_id] = True
+
                     consult_forms = {
                         'ru': (
                             "📞 *Давайте согласуем консультацию!*\n\n"
                             "Наш менеджер свяжется с вами, чтобы обсудить проект и предложить решение под вашу задачу.\n\n"
-                            "Пожалуйста, оставьте несколько данных:\n\n"
-                            "👤 *Имя:* \n"
-                            "🏢 *Компания:* \n"
-                            "📱 *Телефон:* \n"
-                            "🧩 *Кратко опишите задачу:* \n\n"
+                            "Пожалуйста, оставьте несколько данных *в одном сообщении*:\n\n"
+                            "👤 Имя\n"
+                            "🏢 Компания (или прочерк)\n"
+                            "📱 Телефон\n"
+                            "🧩 Кратко опишите задачу\n\n"
                             "_После этого менеджер свяжется в ближайшее время 🙂_"
                         ),
                         'kk': (
                             "📞 *Кеңесті келісейік!*\n\n"
                             "Менеджер сізбен хабарласып, жобаңызды талқылайды және ең тиімді шешімді ұсынады.\n\n"
-                            "Келесі деректерді қалдырыңыз:\n\n"
-                            "👤 *Аты:* \n"
-                            "🏢 *Компания:* \n"
-                            "📱 *Телефон:* \n"
-                            "🧩 *Міндеттің қысқаша сипаттамасы:* \n\n"
+                            "Келесі деректерді *бір хабарламада* қалдырыңыз:\n\n"
+                            "👤 Аты\n"
+                            "🏢 Компания (немесе сызықша)\n"
+                            "📱 Телефон\n"
+                            "🧩 Міндеттің қысқаша сипаттамасы\n\n"
                             "_Біздің менеджер жақын арада хабарласады 🙂_"
                         ),
                         'en': (
-                            "📞 *Let’s arrange your consultation!*\n\n"
+                            "📞 *Let's arrange your consultation!*\n\n"
                             "Our manager will contact you to discuss your project and suggest the best solution.\n\n"
-                            "Please share a few details:\n\n"
-                            "👤 *Name:* \n"
-                            "🏢 *Company:* \n"
-                            "📱 *Phone:* \n"
-                            "🧩 *Briefly describe your task:* \n\n"
+                            "Please share the details *in one message*:\n\n"
+                            "👤 Name\n"
+                            "🏢 Company (or dash)\n"
+                            "📱 Phone\n"
+                            "🧩 Briefly describe your task\n\n"
                             "_Our manager will reach out shortly 🙂_"
                         )
                     }
@@ -921,7 +879,6 @@ RULES:
         if self.price_url:
             ok = self.send_file_by_url(chat_id, self.price_url, self.price_filename, caption=caption)
             if not ok:
-                # Фоллбек: дать ссылку текстом
                 self.send_message(chat_id, caption + "\n\n" + self.price_url)
         else:
             self.send_message(chat_id, caption + "\n\n(Файл прайса пока не подключён. Укажите PRICE_FILE_URL в .env)")
@@ -976,7 +933,6 @@ RULES:
                 logger.error(f"Ошибка в главном цикле: {e}")
                 time.sleep(5)
 
-    # ---- ВСПОМОГАТЕЛЬНОЕ
     def _check_price_link(self):
         try:
             if not self.price_url:
@@ -994,4 +950,5 @@ if __name__ == "__main__":
         bot.run()
     except Exception as e:
         print(f"Ошибка запуска: {e}")
-        print("Проверьте переменные окружения: INSTANCE_ID, INSTANCE_TOKEN, OPENAI_API_KEY, BRAND_NAME, SUPPORT_PHONE, PRICE_FILE_URL, PRICE_FILE_NAME")
+        print(
+            "Проверьте переменные окружения: INSTANCE_ID, INSTANCE_TOKEN, OPENAI_API_KEY, BRAND_NAME, SUPPORT_PHONE, PRICE_FILE_URL, PRICE_FILE_NAME")
