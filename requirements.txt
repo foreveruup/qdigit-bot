@@ -1,3 +1,5 @@
 openai>=1.52.0
 python-dotenv>=1.0.1
 requests>=2.32.3
+gspread
+google-auth
