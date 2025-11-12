@@ -2,6 +2,7 @@ import os
 import requests
 import json
 import time
+import re
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
@@ -587,7 +588,7 @@ RULES:
     def extract_client_info(self, text: str, lang_code: str) -> dict:
         """
         Умное извлечение данных: работает и с метками (Имя:, Телефон:),
-        и с простым вводом строками (Имир / Компания / Телефон / Задача)
+        и с простым вводом строками (Имя / Компания / Телефон / Задача)
         """
         info = {}
         lines = [l.strip() for l in text.split("\n") if l.strip()]
@@ -619,28 +620,32 @@ RULES:
             return info
 
         # 2) АВТО-ПАРСИНГ БЕЗ МЕТОК
-        # Формат: имя / компания / телефон / задача
-        if len(lines) >= 3:
-            # Имя (1 строка)
-            if "name" not in info:
-                info["name"] = lines[0]
+        # Формат: имя / компания / телефон / задача (в любом порядке)
+        import re
 
-            # Компания (2 строка)
-            if "company" not in info and len(lines) >= 2:
-                info["company"] = lines[1]
+        phone_pattern = re.compile(r'[\+\d\(\)\-\s]{7,}')  # Ищем телефоны
 
-            # Телефон — ищем где есть цифры
-            phone_line = None
-            for l in lines:
-                if "+" in l or any(c.isdigit() for c in l):
-                    phone_line = l
-                    break
-            if phone_line and "phone" not in info:
-                info["phone"] = phone_line
+        for idx, line in enumerate(lines):
+            # Ищем телефон (цифры, +, пробелы, скобки)
+            if phone_pattern.search(line) and not info.get('phone'):
+                info['phone'] = line
+                continue
 
-            # Задача = последняя строка
-            if "bot_type" not in info and len(lines) >= 3:
-                info["bot_type"] = lines[-1]
+            # Первая строка без цифр = имя
+            if not info.get('name') and not any(c.isdigit() for c in line):
+                info['name'] = line
+                continue
+
+            # Если есть имя и телефон, следующие строки = компания или задача
+            if info.get('name') and info.get('phone'):
+                if not info.get('company'):
+                    info['company'] = line
+                elif not info.get('bot_type'):
+                    info['bot_type'] = line
+
+        # Если компания не указана, используем "—"
+        if not info.get('company') and info.get('name'):
+            info['company'] = "—"
 
         return info
 
@@ -735,11 +740,17 @@ RULES:
 
                 lang_code = self.user_language[chat_id]
 
+                # НОВЫЙ КОД: проверяем, похоже ли сообщение на данные клиента
+                is_multiline = len([l for l in message_text.split('\n') if l.strip()]) >= 3
+                has_phone = bool(re.search(r'[\+\d\(\)\-\s]{7,}', message_text))
                 field_keywords = ['имя:', 'компания:', 'телефон:', 'name:', 'company:', 'phone:',
                                   'аты:', 'міндет:', 'задач', 'task:']
+                has_labels = any(k in message_text.lower() for k in field_keywords)
 
-                if any(k in message_text.lower() for k in field_keywords):
+                # Если это многострочное сообщение с телефоном ИЛИ с метками — парсим как данные клиента
+                if (is_multiline and has_phone) or has_labels:
                     client_info = self.extract_client_info(message_text, lang_code)
+
                     need = []
                     need_messages = {
                         'ru': {'name': 'Имя', 'company': 'Компания', 'phone': 'Телефон', 'task': 'Задача'},
@@ -747,10 +758,13 @@ RULES:
                         'en': {'name': 'Name', 'company': 'Company', 'phone': 'Phone', 'task': 'Task'}
                     }
                     nm = need_messages.get(lang_code, need_messages['en'])
-                    if not client_info.get('name'): need.append(nm['name'])
-                    if not client_info.get('company'): need.append(nm['company'])
-                    if not client_info.get('phone'): need.append(nm['phone'])
-                    if not client_info.get('bot_type'): need.append(nm['task'])
+
+                    if not client_info.get('name'):
+                        need.append(nm['name'])
+                    if not client_info.get('phone'):
+                        need.append(nm['phone'])
+                    if not client_info.get('bot_type'):
+                        need.append(nm['task'])
 
                     if need:
                         ask_messages = {
@@ -759,9 +773,11 @@ RULES:
                             'en': f"Almost there! Missing: {', '.join(need)}.\nSend in one message."
                         }
                         self.send_message(chat_id, ask_messages.get(lang_code, ask_messages['en']))
+                        self.processed_messages.add(message_id)
+                        if receipt_id:
+                            self.delete_notification(receipt_id)
                         return
 
-                    # ✅ Сохраняем и не идём дальше к GPT
                     if self.save_client_data(phone, client_info):
                         success_messages = {
                             'ru': ("✅ Записал вас на бесплатную консультацию!\n\n"
@@ -776,7 +792,7 @@ RULES:
                                    f"📱 Телефон: {client_info.get('phone')}\n"
                                    f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
                                    "Менеджер жақын арада хабарласады 🙌"),
-                            'en': ("✅ You’re booked for a free consultation!\n\n"
+                            'en': ("✅ You're booked for a free consultation!\n\n"
                                    f"👤 Name: {client_info.get('name')}\n"
                                    f"🏢 Company: {client_info.get('company')}\n"
                                    f"📱 Phone: {client_info.get('phone')}\n"
@@ -784,6 +800,9 @@ RULES:
                                    "Our manager will reach out soon 🙌")
                         }
                         self.send_message(chat_id, success_messages.get(lang_code, success_messages['en']))
+                        self.processed_messages.add(message_id)
+                        if receipt_id:
+                            self.delete_notification(receipt_id)
                         return
 
                 # === Быстрая маршрутизация
