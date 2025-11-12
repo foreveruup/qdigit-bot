@@ -119,6 +119,61 @@ RULES:
         base = t.replace('!', '').replace(',', '').strip()
         return t in all_greetings or base in all_greetings
 
+    # === ЕДИНОЕ ПРИВЕТСТВИЕ + КНОПКИ (после выбора языка) ===
+    def send_welcome_with_actions(self, chat_id: str, lang_code: str) -> bool:
+        """
+        Отправляет одно сообщение с приветствием и интерактивными кнопками:
+        Прайс / Консультация / Наши услуги.
+        """
+        url = f"{self.base_url}/sendInteractiveButtonsReply/{self.api_token}"
+
+        bodies = {
+            'ru': (
+                f"👋 Здравствуйте! Вас приветствует *{self.brand}*.\n"
+                "Мы делаем чат-боты, автоматизацию и сайты для бизнеса в Казахстане.\n\n"
+                "Чем помочь? Выберите действие ниже:"
+            ),
+            'kk': (
+                f"👋 Сәлеметсіз бе! Сізді *{self.brand}* қарсы алады.\n"
+                "Біз Қазақстандағы бизнеске чат-боттар, автоматтандыру және сайттар жасаймыз.\n\n"
+                "Қалай көмектесейін? Төменнен таңдаңыз:"
+            ),
+            'en': (
+                f"👋 Hello! *{self.brand}* here.\n"
+                "We build chatbots, automation and websites for businesses in Kazakhstan.\n\n"
+                "How can we help? Pick an option:"
+            )
+        }
+        labels = {
+            'ru': {"price": "📄 Прайс", "consult": "📞 Консультация", "services": "💬 Наши услуги"},
+            'kk': {"price": "📄 Прайс", "consult": "📞 Кеңес алу", "services": "💬 Қызметтер"},
+            'en': {"price": "📄 Pricing", "consult": "📞 Consultation", "services": "💬 Services"},
+        }
+        body = bodies.get(lang_code, bodies['en'])
+        l = labels.get(lang_code, labels['en'])
+
+        payload = {
+            "chatId": chat_id,
+            "header": " ",
+            "body": body,
+            "footer": self.brand,
+            "buttons": [
+                {"buttonId": "get_price", "buttonText": l["price"]},
+                {"buttonId": "book_consult", "buttonText": l["consult"]},
+                {"buttonId": "short_services", "buttonText": l["services"]},
+            ],
+        }
+
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            ok = r.status_code == 200
+            if not ok:
+                logger.error(f"Ошибка send_welcome_with_actions: {r.status_code} {r.text}")
+            return ok
+        except Exception as e:
+            logger.error(f"Ошибка отправки welcome+actions: {e}")
+            return False
+
     def send_language_selection(self, chat_id: str) -> bool:
         url = f"{self.base_url}/sendInteractiveButtonsReply/{self.api_token}"
         body = (
@@ -166,8 +221,9 @@ RULES:
             self.send_message(chat_id, fallback)
             return False
 
+    # (оставляем как утилиту — но больше напрямую не используем)
     def _send_quick_actions(self, chat_id: str, lang_code: str):
-        """Кнопки: Прайс / Консультация / Услуги (кратко)"""
+        """ЛЕГАСИ: отдельные кнопки без приветствия (на всякий случай)."""
         try:
             url = f"{self.base_url}/sendInteractiveButtonsReply/{self.api_token}"
             actions = {
@@ -182,7 +238,7 @@ RULES:
                 "buttons": [
                     {"buttonId": "get_price", "buttonText": "📄 Прайс"},
                     {"buttonId": "book_consult", "buttonText": "📞 Консультация"},
-                    {"buttonId": "short_services", "buttonText": "💬 Услуги (кратко)"}
+                    {"buttonId": "short_services", "buttonText": "💬 Наши услуги"}
                 ]
             }
             requests.post(url, json=actions, timeout=10)
@@ -215,6 +271,7 @@ RULES:
         except Exception as e:
             logger.error(f"Ошибка загрузки языков: {e}")
 
+    # (оставил — вдруг пригодится где-то ещё)
     def get_welcome_message(self, lang_code: str) -> str:
         if lang_code == 'ru':
             return (
@@ -223,7 +280,7 @@ RULES:
                 "Чем помочь? Выберите:\n"
                 "• 📄 Прайс на услуги\n"
                 "• 📞 Бесплатная консультация\n"
-                "• 💬 Кратко об услугах"
+                "• 💬 Наши услуги"
             )
         if lang_code == 'kk':
             return (
@@ -232,7 +289,7 @@ RULES:
                 "Қалай көмектесейін?\n"
                 "• 📄 Қызметтер прайсы\n"
                 "• 📞 Тегін кеңес\n"
-                "• 💬 Қысқаша қызметтер"
+                "• 💬 Қызметтер"
             )
         return (
             f"👋 Hello! *{self.brand}* here.\n"
@@ -345,8 +402,8 @@ RULES:
             resp = self.client.chat.completions.create(
                 model=self.openai_model,
                 messages=messages,
-                max_tokens=220,        # короче ответы
-                temperature=0.7,       # ровнее стиль
+                max_tokens=220,
+                temperature=0.7,
                 top_p=0.9,
                 frequency_penalty=0.6,
                 presence_penalty=0.4
@@ -396,14 +453,41 @@ RULES:
             'kk': ["жазылу", "кеңес", "қоңырау", "жазыңыз мені"],
             'en': ["schedule", "consultation", "appointment", "call me", "book"]
         }
+
         if any(kw in t for kw in consult_keywords.get(lang_code, [])):
             forms = {
-                'ru': "Отлично! Запишу вас на бесплатную консультацию. Заполните, пожалуйста:\nИмя:\nКомпания:\nТелефон:\nЗадача:",
-                'kk': "Тамаша! Сізді тегін кеңеске жазамын. Толтырыңыз:\nАты:\nКомпания:\nТелефон:\nМіндет:",
-                'en': "Great! I'll schedule a free consultation. Please fill in:\nName:\nCompany:\nPhone:\nTask:"
+                'ru': (
+                    "📞 *Давайте согласуем консультацию!*\n\n"
+                    "Наш менеджер свяжется с вами, чтобы обсудить проект и предложить решение под вашу задачу.\n\n"
+                    "Пожалуйста, оставьте несколько данных:\n\n"
+                    "👤 *Имя:* \n"
+                    "🏢 *Компания:* \n"
+                    "📱 *Телефон:* \n"
+                    "🧩 *Кратко опишите задачу:* \n\n"
+                    "_После этого менеджер свяжется в ближайшее время 🙂_"
+                ),
+                'kk': (
+                    "📞 *Кеңесті келісейік!*\n\n"
+                    "Менеджер сізбен хабарласып, жобаңызды талқылайды және ең тиімді шешімді ұсынады.\n\n"
+                    "Келесі деректерді қалдырыңыз:\n\n"
+                    "👤 *Аты:* \n"
+                    "🏢 *Компания:* \n"
+                    "📱 *Телефон:* \n"
+                    "🧩 *Міндеттің қысқаша сипаттамасы:* \n\n"
+                    "_Біздің менеджер жақын арада хабарласады 🙂_"
+                ),
+                'en': (
+                    "📞 *Let’s arrange your consultation!*\n\n"
+                    "Our manager will contact you to discuss your project and suggest the best solution.\n\n"
+                    "Please share a few details:\n\n"
+                    "👤 *Name:* \n"
+                    "🏢 *Company:* \n"
+                    "📱 *Phone:* \n"
+                    "🧩 *Briefly describe your task:* \n\n"
+                    "_Our manager will reach out shortly 🙂_"
+                )
             }
             return forms.get(lang_code, forms['en'])
-
         return None
 
     # === СОХРАНЕНИЕ КЛИЕНТА ===
@@ -579,9 +663,8 @@ RULES:
                         lang_map = {'1': 'ru', '2': 'kk', '3': 'en'}
                         lang_code = lang_map[message_text.strip()]
                         self.set_language(chat_id, lang_code)
-                        welcome = self.get_welcome_message(lang_code)
-                        self.send_message(chat_id, welcome)
-                        self._send_quick_actions(chat_id, lang_code)   # <— добавили
+                        # единое приветствие + кнопки
+                        self.send_welcome_with_actions(chat_id, lang_code)
                     elif self.is_greeting(message_text):
                         self.send_language_selection(chat_id)
                     else:
@@ -682,16 +765,13 @@ RULES:
 
                 if selected_button == 'lang_ru':
                     self.set_language(chat_id, 'ru')
-                    self.send_message(chat_id, self.get_welcome_message('ru'))
-                    self._send_quick_actions(chat_id, 'ru')   # <— добавили
+                    self.send_welcome_with_actions(chat_id, 'ru')
                 elif selected_button == 'lang_kk':
                     self.set_language(chat_id, 'kk')
-                    self.send_message(chat_id, self.get_welcome_message('kk'))
-                    self._send_quick_actions(chat_id, 'kk')   # <— добавили
+                    self.send_welcome_with_actions(chat_id, 'kk')
                 elif selected_button == 'lang_en':
                     self.set_language(chat_id, 'en')
-                    self.send_message(chat_id, self.get_welcome_message('en'))
-                    self._send_quick_actions(chat_id, 'en')   # <— добавили
+                    self.send_welcome_with_actions(chat_id, 'en')
                 elif selected_button == 'get_price':
                     lang = self.user_language.get(chat_id, 'ru')
                     self._send_price(chat_id, lang)
