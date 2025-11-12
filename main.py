@@ -20,12 +20,15 @@ class WhatsAppBot:
         self.api_token = os.environ.get("INSTANCE_TOKEN")
         self.base_url = f"https://api.green-api.com/waInstance{self.instance_id}"
 
-        self.brand = os.environ.get("BRAND_NAME", "qdigit")
-        self.support_phone = os.environ.get("SUPPORT_PHONE", "+7 777 777 77 77")
-        self.price_url = os.environ.get("PRICE_FILE_URL")  # публичный URL прайса
-        self.price_filename = os.environ.get("PRICE_FILE_NAME", "qdigit_price.pdf")
+        # ДЕФОЛТЫ, чтобы не было None в тексте
+        self.brand = os.environ.get("BRAND_NAME") or "qdigit"
+        self.support_phone = os.environ.get("SUPPORT_PHONE") or "+7 777 777 77 77"
 
+        # Прайс — публичный прямой URL (см. инструкцию ниже) + дефолтное имя
+        self.price_url = os.environ.get("PRICE_FILE_URL")
+        self.price_filename = os.environ.get("PRICE_FILE_NAME") or "qdigit_price.pdf"
 
+        # OpenAI
         self.api_key = os.environ.get("OPENAI_API_KEY")
         self.client = OpenAI(api_key=self.api_key)
         self.openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -36,105 +39,101 @@ class WhatsAppBot:
         # Хранилище выбранного языка для каждого чата
         self.user_language = {}  # {chat_id: 'ru'/'kk'/'en'}
 
-        # Системные промпты для каждого языка
+        # Системные промпты (RU/KK/EN) — всегда говорить от лица бренда и кратко
         self.system_prompts = {
-            'ru': """Ты — тёплый и компетентный консультант компании qdigit (Казахстан).
-        Ты помогаешь клиентам понять наши услуги и выбрать решение под задачу.
+            'ru': f"""Ты — тёплый и компетентный консультант компании {self.brand} (Казахстан).
+Всегда начинай первое предложение с упоминания компании {self.brand}.
+Говори кратко: максимум 4–5 пунктов или 3 коротких абзаца, без «простыней».
 
-        НАШИ УСЛУГИ (знай и предлагай уместно):
-        • Лендинги и сайты (витрины, каталоги, корпоративные)
-        • Аналитика (сквозная, дашборды, метрики)
-        • Автоматизация (бизнес-процессы, интеграции, RPA)
-        • Дизайн (UX/UI, фирстиль, прототипирование)
-        • Чат-боты (WhatsApp/Telegram), оплата, CRM, уведомления
-        • Маркетинг (воронки, eCRM, ретеншн)
-        • SEO (техаудит, семантика, контент)
-        • Контекст (Google Ads, Яндекс РСЯ)
-        • ИИ (ассистенты, генерация контента, поиск)
-        • Интеграции (CRM, ERP, платежи, 1C и др.)
+НАШИ УСЛУГИ (предлагай уместно):
+• Лендинги и сайты
+• Аналитика и дашборды
+• Автоматизация и интеграции
+• Чат-боты (WA/TG), оплаты, CRM
+• Маркетинг, SEO, контекст
+• ИИ (ассистенты, генерация, поиск)
 
-        ПРАВИЛА:
-        • Пиши цены только в тенге (₸).
-        • Если спрашивают прайс — отправь *файл прайса* и короткий комментарий.
-        • Если просят поддержку — дай наш номер поддержки и предложи написать в WhatsApp.
-        • Если не уверен — задай 1–2 уточняющих вопроса, не выдумывай.
-        • Пиши коротко, дружелюбно, по делу. 1–3 эмодзи.
-        • Маркируй ключевые пункты маркерами (•) или короткими абзацами.""",
+ПРАВИЛА:
+• Цены только в тенге (₸).
+• Если спрашивают прайс — предложи и отправь файл прайса (файл отправляет система).
+• Если просят поддержку — дай номер и WhatsApp.
+• Если не уверен — задай 1 уточняющий вопрос.
+• Коротко, дружелюбно, по делу. 1–2 эмодзи.
+• Используй маркеры (•) и короткие строки.""",
 
-            'kk': """Сіз qdigit компаниясының жылы әрі білікті кеңесші ботсыз (Қазақстан).
-        Клиенттерге қызметтерімізді түсіндіріп, дұрыс шешім таңдауға көмектесесіз.
+            'kk': f"""{self.brand} компаниясының жылы әрі білікті кеңесшісісіз (Қазақстан).
+Алғашқы сөйлемде міндетті түрде {self.brand} атауын айтыңыз.
+Қысқа жазыңыз: ең көбі 4–5 тармақ немесе 3 қысқа абзац.
 
-        ҚЫЗМЕТТЕР:
-        • Лендингтер және сайттар
-        • Аналитика (сквозная, дашбордтар)
-        • Автоматтандыру
-        • Дизайн (UX/UI)
-        • Чат-боттар (WhatsApp/Telegram)
-        • Маркетинг
-        • SEO
-        • Контекст
-        • ЖИ (AI)
-        • Интеграциялар (CRM, ERP, төлемдер)
+ҚЫЗМЕТТЕР:
+• Лендингтер/сайттар
+• Аналитика, дашбордтар
+• Автоматтандыру және интеграциялар
+• Чат-боттар (WA/TG), төлемдер, CRM
+• Маркетинг, SEO, контекст
+• ЖИ (көмекшілер, генерация, іздеу)
 
-        ЕРЕЖЕЛЕР:
-        • Бағаларды тек теңгемен (₸) жазыңыз.
-        • Баға сұраса — *прайс файлын* жіберіңіз және қысқа түсініктеме қосыңыз.
-        • Қолдау керек болса — біздің қолдау нөмірін беріңіз.
-        • Қысқа, достық, 1–3 эмодзи.""",
+ЕРЕЖЕЛЕР:
+• Бағалар тек теңгемен (₸).
+• Баға сұраса — прайс файлын ұсыныңыз (файлды жүйе жібереді).
+• Қолдау керек болса — біздің нөмірді беріңіз.
+• Қысқа әрі нақты болыңыз. 1–2 эмодзи.""",
 
-            'en': """You are a warm, competent consultant for qdigit (Kazakhstan).
-        Help clients understand our services and pick the right solution.
+            'en': f"""You are a warm, competent consultant of {self.brand} (Kazakhstan).
+Always start the first sentence by mentioning {self.brand}.
+Keep it brief: max 4–5 bullets or 3 short paragraphs.
 
-        SERVICES:
-        • Landing pages & websites
-        • Analytics (end-to-end, dashboards)
-        • Automation (workflows, RPA, integrations)
-        • Design (UX/UI, branding)
-        • Chatbots (WhatsApp/Telegram), payments, CRM
-        • Marketing
-        • SEO
-        • PPC
-        • AI (assistants, content, search)
-        • Integrations (CRM/ERP/payments)
+SERVICES:
+• Landing pages & websites
+• Analytics & dashboards
+• Automation & integrations
+• Chatbots (WA/TG), payments, CRM
+• Marketing, SEO, PPC
+• AI (assistants, generation, search)
 
-        RULES:
-        • Prices only in KZT (₸).
-        • If asked for price — send the *price file* and a brief note.
-        • If they ask for support — provide our support number and suggest WhatsApp.
-        • Be concise, friendly, 1–3 emojis."""
+RULES:
+• Prices in KZT (₸) only.
+• When asked for pricing — offer and send the price file (system sends the file).
+• If support is requested — share our phone & WhatsApp.
+• Ask 1 clarifying question if unsure.
+• Be concise and friendly. 1–2 emojis."""
         }
 
         self.processed_messages = set()
         self.history = {}
         self.last_reply = {}
 
-        # === ВЫБОР ЯЗЫКА ===
+        # ==== (опционально) Быстрая самопроверка ссылки прайса
+        self._check_price_link()
+
+    # === ВЫБОР ЯЗЫКА ===
 
     def is_greeting(self, text: str) -> bool:
-        """Проверка, является ли сообщение приветствием"""
-        t = text.lower().strip()
-        # Русские приветствия
+        t = (text or "").lower().strip()
         ru_greetings = {'привет', 'здравствуй', 'здравствуйте', 'салам', 'здорово',
                         'добрый день', 'добрый вечер', 'доброе утро', 'прив', 'здраст',
                         'дратути', 'хай', 'приветик', 'приветствую'}
-        # Казахские приветствия
-        kk_greetings = {'сәлем', 'салам', 'сәлеметсіз бе', 'қайырлы таң',
-                        'қайырлы күн', 'қайырлы кеш'}
-        # Английские приветствия
-        en_greetings = {'hi', 'hello', 'hey', 'good morning', 'good day',
-                        'good evening', 'greetings', 'hiya', 'howdy'}
-
+        kk_greetings = {'сәлем', 'салам', 'сәлеметсіз бе', 'қайырлы таң', 'қайырлы күн', 'қайырлы кеш'}
+        en_greetings = {'hi', 'hello', 'hey', 'good morning', 'good day', 'good evening', 'greetings', 'hiya', 'howdy'}
         all_greetings = ru_greetings | kk_greetings | en_greetings
-
-        # Проверяем точное совпадение и без знаков препинания
-        return t in all_greetings or t.replace('!', '').replace(',', '').strip() in all_greetings
+        base = t.replace('!', '').replace(',', '').strip()
+        return t in all_greetings or base in all_greetings
 
     def send_language_selection(self, chat_id: str) -> bool:
         url = f"{self.base_url}/sendInteractiveButtonsReply/{self.api_token}"
+        body = (
+            "👋 *Здравствуйте!* Вас приветствует компания *{brand}*.\n"
+            "👋 *Сәлеметсіз бе!* Сізді *{brand}* компаниясы қарсы алады.\n"
+            "👋 *Hello!* You’re welcomed by *{brand}*.\n\n"
+            "Пожалуйста, выберите удобный язык общения:\n"
+            "Өзіңізге ыңғайлы тілді таңдаңыз:\n"
+            "Please choose your language:"
+        ).format(brand=self.brand)
+
         payload = {
             "chatId": chat_id,
             "header": " ",
-            "body": "👋 Выберите язык общения\nҚарым-қатынас тілін таңдаңыз\nChoose your language",
+            "body": body,
             "footer": self.brand,
             "buttons": [
                 {"buttonId": "lang_ru", "buttonText": "🇷🇺 Русский"},
@@ -144,14 +143,14 @@ class WhatsAppBot:
         }
 
         fallback = (
-            "👋 *Выберите язык общения*\n"
-            "🇰🇿 *Қарым-қатынас тілін таңдаңыз*\n"
-            "🇬🇧 *Choose your language*\n\n"
+            f"👋 *Здравствуйте!* Вас приветствует компания *{self.brand}*.\n"
+            "👋 *Сәлеметсіз бе!* Сізді *{brand}* компаниясы қарсы алады.\n"
+            "👋 *Hello!* You’re welcomed by *{brand}*.\n\n"
             "1️⃣ Русский 🇷🇺\n"
             "2️⃣ Қазақша 🇰🇿\n"
             "3️⃣ English 🇬🇧\n\n"
             "_Напишите цифру / Санды жазыңыз / Type number_"
-        )
+        ).replace("{brand}", self.brand)
 
         try:
             r = requests.post(url, json=payload, timeout=10)
@@ -159,7 +158,6 @@ class WhatsAppBot:
                 logger.info(f"✅ Отправлены кнопки выбора языка для {chat_id}")
                 return True
             else:
-
                 logger.error(f"Ошибка отправки кнопок: {r.status_code} {r.text}")
                 self.send_message(chat_id, fallback)
                 return False
@@ -168,12 +166,32 @@ class WhatsAppBot:
             self.send_message(chat_id, fallback)
             return False
 
+    def _send_quick_actions(self, chat_id: str, lang_code: str):
+        """Кнопки: Прайс / Консультация / Услуги (кратко)"""
+        try:
+            url = f"{self.base_url}/sendInteractiveButtonsReply/{self.api_token}"
+            actions = {
+                "chatId": chat_id,
+                "header": " ",
+                "body": {
+                    'ru': "Выберите действие:",
+                    'kk': "Әрекетті таңдаңыз:",
+                    'en': "Choose an action:"
+                }.get(lang_code, "Choose an action:"),
+                "footer": self.brand,
+                "buttons": [
+                    {"buttonId": "get_price", "buttonText": "📄 Прайс"},
+                    {"buttonId": "book_consult", "buttonText": "📞 Консультация"},
+                    {"buttonId": "short_services", "buttonText": "💬 Услуги (кратко)"}
+                ]
+            }
+            requests.post(url, json=actions, timeout=10)
+        except Exception as e:
+            logger.error(f"Ошибка отправки быстрых действий: {e}")
+
     def set_language(self, chat_id: str, lang_code: str):
-        """Установка языка для пользователя"""
         self.user_language[chat_id] = lang_code
         logger.info(f"🌍 Язык для {chat_id} установлен: {lang_code}")
-
-        # Сохраняем в файл для персистентности
         try:
             filename = "user_languages.json"
             if os.path.exists(filename):
@@ -181,16 +199,13 @@ class WhatsAppBot:
                     langs = json.load(f)
             else:
                 langs = {}
-
             langs[chat_id] = lang_code
-
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(langs, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Ошибка сохранения языка: {e}")
 
     def load_user_languages(self):
-        """Загрузка сохраненных языков пользователей"""
         try:
             filename = "user_languages.json"
             if os.path.exists(filename):
@@ -201,81 +216,56 @@ class WhatsAppBot:
             logger.error(f"Ошибка загрузки языков: {e}")
 
     def get_welcome_message(self, lang_code: str) -> str:
-        """Приветственное сообщение после выбора языка"""
-        messages = {
-            'ru': (
-                "✅ *Отлично!* 🎉\n\n"
-                "Я помогу с ботами и автоматизацией бизнеса.\n\n"
-                "*Что я умею:*\n"
-                "• Рассказать о возможностях\n"
-                "• Посчитать стоимость\n"
-                "• Записать на консультацию\n\n"
-                "Что вас интересует? 😊"
-            ),
-            'kk': (
-                "✅ *Тамаша!* 🎉\n\n"
-                "Мен боттар мен бизнес автоматтандыруы бойынша көмектесемін.\n\n"
-                "*Не істей аламын:*\n"
-                "• Мүмкіндіктер туралы айту\n"
-                "• Құнды есептеу\n"
-                "• Кеңеске жазу\n\n"
-                "Сізді не қызықтырады? 😊"
-            ),
-            'en': (
-                "✅ *Great!* 🎉\n\n"
-                "I'll help with bots and business automation.\n\n"
-                "*What I can do:*\n"
-                "• Tell you about capabilities\n"
-                "• Calculate costs\n"
-                "• Schedule a consultation\n\n"
-                "What are you interested in? 😊"
+        if lang_code == 'ru':
+            return (
+                f"👋 Здравствуйте! Вас приветствует *{self.brand}*.\n"
+                "Мы делаем чат-боты, автоматизацию и сайты для бизнеса в Казахстане.\n\n"
+                "Чем помочь? Выберите:\n"
+                "• 📄 Прайс на услуги\n"
+                "• 📞 Бесплатная консультация\n"
+                "• 💬 Кратко об услугах"
             )
-        }
-        return messages.get(lang_code, messages['en'])
+        if lang_code == 'kk':
+            return (
+                f"👋 Сәлеметсіз бе! Сізді *{self.brand}* қарсы алады.\n"
+                "Біз Қазақстандағы бизнеске чат-боттар, автоматтандыру және сайттар жасаймыз.\n\n"
+                "Қалай көмектесейін?\n"
+                "• 📄 Қызметтер прайсы\n"
+                "• 📞 Тегін кеңес\n"
+                "• 💬 Қысқаша қызметтер"
+            )
+        return (
+            f"👋 Hello! *{self.brand}* here.\n"
+            "We build chatbots, automation and websites for businesses in Kazakhstan.\n\n"
+            "How can we help?\n"
+            "• 📄 Pricing file\n"
+            "• 📞 Free consultation\n"
+            "• 💬 Services overview"
+        )
 
     # === УТИЛИТЫ ===
 
     def _extract_text(self, message_data: dict) -> str:
-        """
-        Возвращает текст из разных типов входящих сообщений Green-API:
-        - textMessageData.textMessage
-        - extendedTextMessageData.text
-        - quotedMessage (если нужно)
-        - listMessage/ buttonsResponse (если решите обрабатывать)
-        """
         if not message_data:
             return ""
-
-        # 1) Простой текст
         t = message_data.get("textMessageData", {}).get("textMessage")
         if t:
             return t
-
-        # 2) Текст из extended (часто при старте из wa.me, при наличии URL/предпросмотра)
         t = message_data.get("extendedTextMessageData", {}).get("text")
         if t:
             return t
-
-        # 3) Иногда провайдеры кладут в "message" или "caption"
         t = message_data.get("message", "")
         if t:
             return t
         t = message_data.get("caption", "")
         if t:
             return t
-
-        # 4) На будущее: кнопки/листы (если будете использовать)
-        # selectedButtonText = message_data.get("interactiveButtonsResponse", {}).get("selectedButtonText")
-        # if selectedButtonText: return selectedButtonText
-
         return ""
 
     def _normalize_text(self, text: str) -> str:
-        # удаляем невидимые символы, лишние пробелы, NBSP/ZWSP
         return (text or "").replace("\u200b", "").replace("\xa0", " ").strip()
 
     def clear_chat_history(self, chat_id: str):
-        """Очистка истории чата"""
         if chat_id in self.history:
             del self.history[chat_id]
         if chat_id in self.last_reply:
@@ -285,7 +275,6 @@ class WhatsAppBot:
         logger.info(f"История чата {chat_id} очищена")
 
     def send_message(self, chat_id: str, message: str) -> bool:
-        """Отправка текстового сообщения"""
         url = f"{self.base_url}/sendMessage/{self.api_token}"
         payload = {"chatId": chat_id, "message": message}
         try:
@@ -299,16 +288,8 @@ class WhatsAppBot:
             return False
 
     def send_file_by_url(self, chat_id: str, file_url: str, file_name: str, caption: str = "") -> bool:
-        """
-        Отправка файла по публичному URL (Green-API: sendFileByUrl).
-        """
         url = f"{self.base_url}/sendFileByUrl/{self.api_token}"
-        payload = {
-            "chatId": chat_id,
-            "urlFile": file_url,
-            "fileName": file_name,
-            "caption": caption or ""
-        }
+        payload = {"chatId": chat_id, "urlFile": file_url, "fileName": file_name, "caption": caption or ""}
         try:
             r = requests.post(url, json=payload, timeout=15)
             ok = r.status_code == 200
@@ -320,13 +301,11 @@ class WhatsAppBot:
             return False
 
     def get_notification(self) -> Optional[dict]:
-        """Получение уведомления"""
         url = f"{self.base_url}/receiveNotification/{self.api_token}"
         try:
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
-                data = r.json()
-                return data
+                return r.json()
             logger.error("receiveNotification %s %s", r.status_code, r.text)
             return None
         except Exception as e:
@@ -334,7 +313,6 @@ class WhatsAppBot:
             return None
 
     def delete_notification(self, receipt_id: int) -> bool:
-        """Удаление уведомления"""
         url = f"{self.base_url}/deleteNotification/{self.api_token}/{receipt_id}"
         try:
             r = requests.delete(url, timeout=10)
@@ -348,34 +326,30 @@ class WhatsAppBot:
 
     # === LLM ===
     def get_openai_response(self, chat_id: str, user_message: str) -> str:
-        """Ответ от OpenAI с учетом выбранного языка"""
         lang_code = self.user_language.get(chat_id, 'ru')
         system_prompt = self.system_prompts.get(lang_code, self.system_prompts['ru'])
 
         hist = self.history.setdefault(chat_id, [])
         hist.append({"role": "user", "content": user_message})
-
         window = hist[-12:]
 
         style_rules = {
-            'ru': "Говори коротко, дружелюбно и по делу. Используй эмодзи умеренно (1–3 на ответ).",
-            'kk': "Қысқа, достық және іс бойынша жауап беріңіз. Эмодзиді қолданыңыз (1–3 жауапқа).",
-            'en': "Speak briefly, friendly and to the point. Use emojis moderately (1–3 per response)."
+            'ru': "Говори коротко, дружелюбно и по делу. Используй 1–2 эмодзи.",
+            'kk': "Қысқа, достық және нақты. 1–2 эмодзи.",
+            'en': "Be brief, friendly, to the point. Use 1–2 emojis."
         }
-
         system = system_prompt + "\n\nСТИЛЬ:\n" + style_rules.get(lang_code, style_rules['en'])
-
         messages = [{"role": "system", "content": system}] + window
 
         try:
             resp = self.client.chat.completions.create(
                 model=self.openai_model,
                 messages=messages,
-                max_tokens=350,
-                temperature=0.8,
+                max_tokens=220,        # короче ответы
+                temperature=0.7,       # ровнее стиль
                 top_p=0.9,
                 frequency_penalty=0.6,
-                presence_penalty=0.5
+                presence_penalty=0.4
             )
             answer = resp.choices[0].message.content.strip()
             hist.append({"role": "assistant", "content": answer})
@@ -395,17 +369,15 @@ class WhatsAppBot:
     def route_intent(self, text: str, lang_code: str) -> Optional[str]:
         t = (text or "").lower().strip()
 
-        # Прайс/цены
         price_kw = {
-            'ru': ["цена", "стоимость", "прайс", "сколько стоит", "прайслист", "прайс-лист", "ценник"],
-            'kk': ["баға", "құны", "прайс"],
-            'en': ["price", "pricing", "cost", "how much", "pricelist"]
+            'ru': ["цена", "стоимость", "прайс", "сколько стоит", "прайслист", "прайс-лист", "ценник",
+                   "давай", "давайте", "скинь", "скиньте", "пришли", "прайс пожалуйста", "прайс пж", "ок", "окей"],
+            'kk': ["баға", "құны", "прайс", "иә", "болсын", "жібер", "жібере сал", "ок"],
+            'en': ["price", "pricing", "cost", "how much", "pricelist", "send price", "ok", "okay", "yes", "share price"]
         }
         if any(k in t for k in price_kw.get(lang_code, [])):
-            # Вернем специальный маркер — дальше обработаем отправку файла
             return "__INTENT_PRICE__"
 
-        # Поддержка
         support_kw = {
             'ru': ["поддержк", "саппорт", "техпод", "help", "support", "помощь", "свяжитесь"],
             'kk': ["қолдау", "көмек", "support"],
@@ -419,7 +391,6 @@ class WhatsAppBot:
             }
             return note.get(lang_code, note['en'])
 
-        # Консультация (как было)
         consult_keywords = {
             'ru': ["записаться", "консультац", "созвон", "перезвон", "запишите меня"],
             'kk': ["жазылу", "кеңес", "қоңырау", "жазыңыз мені"],
@@ -437,7 +408,7 @@ class WhatsAppBot:
 
     # === СОХРАНЕНИЕ КЛИЕНТА ===
     def save_client_data(self, phone: str, data: dict) -> bool:
-        """Сохранение данных клиента"""
+        """Локально JSON + (опционально) запись в Google Sheets/CSV (см. ниже)."""
         try:
             filename = "client_records.json"
             if os.path.exists(filename):
@@ -450,30 +421,76 @@ class WhatsAppBot:
 
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(clients, f, ensure_ascii=False, indent=2)
+
+            # Доп. канал — Google Sheets / CSV
+            self._persist_to_sheets_and_csv(clients[phone])
+
             logger.info(f"Записан клиент {phone}: {data.get('name', 'Без имени')}")
             return True
         except Exception as e:
             logger.error(f"Ошибка сохранения: {e}")
             return False
 
+    def _persist_to_sheets_and_csv(self, row: dict):
+        """Опционально: отправка в Google Sheets (если настроено), + append в CSV."""
+        # CSV (просто и полезно для Excel)
+        try:
+            import csv
+            csv_exists = os.path.exists("client_records.csv")
+            with open("client_records.csv", "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["recorded_at", "name", "company", "phone", "bot_type", "status"])
+                if not csv_exists:
+                    writer.writeheader()
+                writer.writerow({
+                    "recorded_at": row.get("recorded_at"),
+                    "name": row.get("name"),
+                    "company": row.get("company"),
+                    "phone": row.get("phone"),
+                    "bot_type": row.get("bot_type"),
+                    "status": row.get("status", "new"),
+                })
+        except Exception as e:
+            logger.warning(f"Ошибка записи в CSV: {e}")
+
+        # Google Sheets (если заданы переменные)
+        try:
+            g_enable = os.environ.get("GOOGLE_SHEETS_ENABLED", "").lower() == "true"
+            creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+            sheet_name = os.environ.get("GOOGLE_SHEETS_SPREADSHEET")
+            worksheet = os.environ.get("GOOGLE_SHEETS_WORKSHEET", "Leads")
+
+            if g_enable and creds_json and sheet_name:
+                import gspread
+                from google.oauth2.service_account import Credentials
+
+                creds_dict = json.loads(creds_json)
+                scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+                credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+                gc = gspread.authorize(credentials)
+                sh = gc.open(sheet_name)
+                ws = sh.worksheet(worksheet) if worksheet in [w.title for w in sh.worksheets()] else sh.add_worksheet(title=worksheet, rows=1000, cols=10)
+
+                headers = ["recorded_at", "name", "company", "phone", "bot_type", "status"]
+                if ws.row_count == 0 or ws.acell("A1").value is None:
+                    ws.insert_row(headers, 1)
+                ws.append_row([row.get("recorded_at"), row.get("name"), row.get("company"),
+                               row.get("phone"), row.get("bot_type"), row.get("status", "new")], value_input_option="USER_ENTERED")
+        except Exception as e:
+            logger.warning(f"Google Sheets недоступен или не настроен: {e}")
+
     def extract_client_info(self, text: str, lang_code: str) -> dict:
-        """Извлечение информации о клиенте"""
         info = {}
         keywords = {
             'ru': {'name': ['имя:', 'name:'], 'company': ['компания:', 'company:'],
                    'phone': ['телефон:', 'phone:'], 'task': ['задача:', 'задач']},
             'kk': {'name': ['аты:', 'name:'], 'company': ['компания:', 'company:'],
                    'phone': ['телефон:', 'phone:'], 'task': ['міндет:', 'міндет']},
-            'en': {'name': ['name:'], 'company': ['company:'],
-                   'phone': ['phone:'], 'task': ['task:']}
+            'en': {'name': ['name:'], 'company': ['company:'], 'phone': ['phone:'], 'task': ['task:']}
         }
-
         kw = keywords.get(lang_code, keywords['en'])
-
         for raw_line in text.split('\n'):
             line = raw_line.strip()
             low = line.lower()
-
             if any(k in low for k in kw['name']):
                 info['name'] = line.split(':', 1)[1].strip()
             elif any(k in low for k in kw['company']):
@@ -482,12 +499,10 @@ class WhatsAppBot:
                 info['phone'] = line.split(':', 1)[1].strip()
             elif any(k in low for k in kw['task']):
                 info['bot_type'] = line.split(':', 1)[1].strip()
-
         return info
 
     # === ОБРАБОТКА СООБЩЕНИЙ ===
     def process_message(self, notification: dict):
-        """Основная обработка сообщения"""
         try:
             if not notification:
                 return
@@ -497,17 +512,13 @@ class WhatsAppBot:
                 return
 
             type_webhook = body.get('typeWebhook', '')
-
-            # Получаем message_id на корневом уровне (исправление)
             message_id = body.get('idMessage')
 
-            # Дедупликация (теперь работает для всех типов)
             if message_id and message_id in self.processed_messages:
                 if receipt_id:
                     self.delete_notification(receipt_id)
                 return
 
-            # Игнорируем нерелевантные вебхуки
             if type_webhook != 'incomingMessageReceived':
                 if receipt_id:
                     self.delete_notification(receipt_id)
@@ -515,7 +526,6 @@ class WhatsAppBot:
 
             message_data = body.get('messageData', {})
             sender_data = body.get('senderData', {})
-
             chat_id = sender_data.get('chatId', '')
             phone = sender_data.get('sender', '')
 
@@ -525,14 +535,13 @@ class WhatsAppBot:
                 return
 
             if message_data.get('typeMessage') in ('textMessage', 'extendedTextMessage') or \
-                    ('textMessageData' in message_data or 'extendedTextMessageData' in message_data):
+               ('textMessageData' in message_data or 'extendedTextMessageData' in message_data):
 
                 raw_text = self._extract_text(message_data)
                 message_text = self._normalize_text(raw_text)
 
                 if not message_text:
-                    logger.warning(
-                        f"Пустой текст при входящем сообщении. type={message_data.get('typeMessage')}, data={json.dumps(message_data, ensure_ascii=False)[:1000]}")
+                    logger.warning(f"Пустой текст при входящем сообщении. type={message_data.get('typeMessage')}")
                     if chat_id not in self.user_language:
                         self.send_language_selection(chat_id)
                     else:
@@ -544,7 +553,7 @@ class WhatsAppBot:
 
                 logger.info(f"📩 Текстовое сообщение от {phone}: {message_text}")
 
-                # === ADMIN КОМАНДЫ ===
+                # === ADMIN
                 if message_text.strip().startswith('/clients'):
                     if phone.replace('+', '') in {"77776463138"}:
                         self.handle_clients_command(chat_id)
@@ -564,7 +573,7 @@ class WhatsAppBot:
                         self.delete_notification(receipt_id)
                     return
 
-                # === ПРОВЕРКА ВЫБОРА ЯЗЫКА ===
+                # === ЯЗЫК
                 if chat_id not in self.user_language:
                     if message_text.strip() in ['1', '2', '3']:
                         lang_map = {'1': 'ru', '2': 'kk', '3': 'en'}
@@ -572,11 +581,11 @@ class WhatsAppBot:
                         self.set_language(chat_id, lang_code)
                         welcome = self.get_welcome_message(lang_code)
                         self.send_message(chat_id, welcome)
+                        self._send_quick_actions(chat_id, lang_code)   # <— добавили
                     elif self.is_greeting(message_text):
                         self.send_language_selection(chat_id)
                     else:
                         logger.info(f"⏸️ Игнорируем сообщение до выбора языка: {message_text[:50]}")
-
                     self.processed_messages.add(message_id)
                     if receipt_id:
                         self.delete_notification(receipt_id)
@@ -584,21 +593,18 @@ class WhatsAppBot:
 
                 lang_code = self.user_language[chat_id]
 
+                # === Формы клиента
                 field_keywords = ['имя:', 'компания:', 'телефон:', 'name:', 'company:', 'phone:',
                                   'аты:', 'міндет:', 'задач', 'task:']
-
                 if any(k in message_text.lower() for k in field_keywords):
                     client_info = self.extract_client_info(message_text, lang_code)
-
                     need = []
                     need_messages = {
                         'ru': {'name': 'Имя', 'company': 'Компания', 'phone': 'Телефон', 'task': 'Задача'},
                         'kk': {'name': 'Аты', 'company': 'Компания', 'phone': 'Телефон', 'task': 'Міндет'},
                         'en': {'name': 'Name', 'company': 'Company', 'phone': 'Phone', 'task': 'Task'}
                     }
-
                     nm = need_messages.get(lang_code, need_messages['en'])
-
                     if not client_info.get('name'): need.append(nm['name'])
                     if not client_info.get('company'): need.append(nm['company'])
                     if not client_info.get('phone'): need.append(nm['phone'])
@@ -614,30 +620,24 @@ class WhatsAppBot:
                     else:
                         if self.save_client_data(phone, client_info):
                             success_messages = {
-                                'ru': (
-                                    "✅ Записал вас на бесплатную консультацию!\n\n"
-                                    f"👤 Имя: {client_info.get('name')}\n"
-                                    f"🏢 Компания: {client_info.get('company')}\n"
-                                    f"📱 Телефон: {client_info.get('phone')}\n"
-                                    f"🧩 Задача: {client_info.get('bot_type')}\n\n"
-                                    "Свяжемся в ближайшее время. Предпочтительнее звонок или WhatsApp? 🙂"
-                                ),
-                                'kk': (
-                                    "✅ Сізді тегін кеңеске жаздым!\n\n"
-                                    f"👤 Аты: {client_info.get('name')}\n"
-                                    f"🏢 Компания: {client_info.get('company')}\n"
-                                    f"📱 Телефон: {client_info.get('phone')}\n"
-                                    f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
-                                    "Жақын арада хабарласамыз. Қоңырау немесе WhatsApp артық па? 🙂"
-                                ),
-                                'en': (
-                                    "✅ Scheduled you for a free consultation!\n\n"
-                                    f"👤 Name: {client_info.get('name')}\n"
-                                    f"🏢 Company: {client_info.get('company')}\n"
-                                    f"📱 Phone: {client_info.get('phone')}\n"
-                                    f"🧩 Task: {client_info.get('bot_type')}\n\n"
-                                    "We'll contact you soon. Do you prefer call or WhatsApp? 🙂"
-                                )
+                                'ru': ("✅ Записал вас на бесплатную консультацию!\n\n"
+                                       f"👤 Имя: {client_info.get('name')}\n"
+                                       f"🏢 Компания: {client_info.get('company')}\n"
+                                       f"📱 Телефон: {client_info.get('phone')}\n"
+                                       f"🧩 Задача: {client_info.get('bot_type')}\n\n"
+                                       "Свяжемся в ближайшее время. Предпочтительнее звонок или WhatsApp? 🙂"),
+                                'kk': ("✅ Сізді тегін кеңеске жаздым!\n\n"
+                                       f"👤 Аты: {client_info.get('name')}\n"
+                                       f"🏢 Компания: {client_info.get('company')}\n"
+                                       f"📱 Телефон: {client_info.get('phone')}\n"
+                                       f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
+                                       "Жақын арада хабарласамыз. Қоңырау немесе WhatsApp артық па? 🙂"),
+                                'en': ("✅ Scheduled you for a free consultation!\n\n"
+                                       f"👤 Name: {client_info.get('name')}\n"
+                                       f"🏢 Company: {client_info.get('company')}\n"
+                                       f"📱 Phone: {client_info.get('phone')}\n"
+                                       f"🧩 Task: {client_info.get('bot_type')}\n\n"
+                                       "We'll contact you soon. Do you prefer call or WhatsApp? 🙂")
                             }
                             self.send_message(chat_id, success_messages.get(lang_code, success_messages['en']))
 
@@ -646,34 +646,19 @@ class WhatsAppBot:
                         self.delete_notification(receipt_id)
                     return
 
-                # Быстрая маршрутизация (ваш код)
+                # === Быстрая маршрутизация
                 quick = self.route_intent(message_text, lang_code)
                 if quick:
                     if quick == "__INTENT_PRICE__":
-                        # Отправка прайса файлом (если есть URL), иначе fallback
-                        caption_map = {
-                            'ru': "Отправляю актуальный прайс qdigit. Если нужен расчёт под вашу задачу — напишите нишу и сроки 🙂",
-                            'kk': "qdigit бағалар тізімін жіберемін. Нақты есеп керек болса — сала мен мерзімдерді жазыңыз 🙂",
-                            'en': "Sharing qdigit pricing file. For a tailored estimate, tell your niche and timeline 🙂"
-                        }
-                        caption = caption_map.get(lang_code, caption_map['en'])
-                        if self.price_url:
-                            ok = self.send_file_by_url(chat_id, self.price_url, self.price_filename, caption=caption)
-                            if not ok:
-                                self.send_message(chat_id,
-                                                  caption + "\n\n(Не удалось отправить файл. Вот ссылка: " + self.price_url + ")")
-                        else:
-                            self.send_message(chat_id,
-                                              caption + "\n\n(Файл прайса пока не подключён. Укажите PRICE_FILE_URL в .env)")
+                        self._send_price(chat_id, lang_code)
                     else:
                         self.send_message(chat_id, quick)
-
                     self.processed_messages.add(message_id)
                     if receipt_id:
                         self.delete_notification(receipt_id)
                     return
 
-                # Ответ через GPT (ваш код)
+                # === Ответ через GPT
                 response = self.get_openai_response(chat_id, message_text)
                 self.send_message(chat_id, response)
 
@@ -682,42 +667,56 @@ class WhatsAppBot:
                     self.delete_notification(receipt_id)
                 return
 
-            # ОБРАБОТКА: Ответ на интерактивные кнопки
+            # === КНОПКИ
             elif message_data.get('typeMessage') == 'interactiveButtonsResponse':
-                # Правильная структура: interactiveButtonsResponse содержит данные
                 reply_data = message_data.get('interactiveButtonsResponse', {})
                 selected_button = reply_data.get('selectedButtonId', '')
                 selected_text = reply_data.get('selectedButtonText', '')
-
                 if not selected_button:
-                    logger.error(
-                        f"Нет selectedButtonId в button reply для {chat_id}. Полная data: {json.dumps(message_data)}")
+                    logger.error(f"Нет selectedButtonId: {json.dumps(message_data)}")
                     if receipt_id:
                         self.delete_notification(receipt_id)
                     return
 
                 logger.info(f"🔘 Нажата кнопка: {selected_button} ({selected_text}) от {chat_id}")
 
-                # Определяем язык (ваш код)
                 if selected_button == 'lang_ru':
                     self.set_language(chat_id, 'ru')
                     self.send_message(chat_id, self.get_welcome_message('ru'))
+                    self._send_quick_actions(chat_id, 'ru')   # <— добавили
                 elif selected_button == 'lang_kk':
                     self.set_language(chat_id, 'kk')
                     self.send_message(chat_id, self.get_welcome_message('kk'))
+                    self._send_quick_actions(chat_id, 'kk')   # <— добавили
                 elif selected_button == 'lang_en':
                     self.set_language(chat_id, 'en')
                     self.send_message(chat_id, self.get_welcome_message('en'))
+                    self._send_quick_actions(chat_id, 'en')   # <— добавили
+                elif selected_button == 'get_price':
+                    lang = self.user_language.get(chat_id, 'ru')
+                    self._send_price(chat_id, lang)
+                elif selected_button == 'book_consult':
+                    forms = {
+                        'ru': "Запишу вас на бесплатную консультацию. Заполните:\nИмя:\nКомпания:\nТелефон:\nЗадача:",
+                        'kk': "Сізді тегін кеңеске жазамын. Толтырыңыз:\nАты:\nКомпания:\nТелефон:\nМіндет:",
+                        'en': "I'll schedule a free consultation. Please fill in:\nName:\nCompany:\nPhone:\nTask:"
+                    }
+                    self.send_message(chat_id, forms.get(self.user_language.get(chat_id, 'ru')))
+                elif selected_button == 'short_services':
+                    brief = {
+                        'ru': "Наши основные услуги:\n• Чат-боты (WA/TG) и интеграции\n• Автоматизация процессов\n• Сайты/лендинги\n• Аналитика и дашборды\n• AI-ассистенты\n\nЧто нужно именно вам? 🙂",
+                        'kk': "Басты қызметтер:\n• Чат-боттар және интеграциялар\n• Процестерді автоматтандыру\n• Сайттар/лендингтер\n• Аналитика, дашбордтар\n• AI көмекшілері\n\nСізге нақты не қажет? 🙂",
+                        'en': "Core services:\n• Chatbots & integrations\n• Workflow automation\n• Websites/landing pages\n• Analytics dashboards\n• AI assistants\n\nWhat do you need? 🙂"
+                    }
+                    self.send_message(chat_id, brief.get(self.user_language.get(chat_id, 'ru')))
 
                 self.processed_messages.add(message_id)
                 if receipt_id:
                     self.delete_notification(receipt_id)
                 return
 
-            # Для других типов сообщений (напр. изображения, голосовые) - игнорируем
             else:
-                logger.info(
-                    f"Игнорируем неподдерживаемый тип сообщения: {message_data.get('typeMessage')}. Полная data: {json.dumps(message_data)}")
+                logger.info(f"Игнорируем неподдерживаемый тип: {message_data.get('typeMessage')}")
                 if receipt_id:
                     self.delete_notification(receipt_id)
                 return
@@ -728,42 +727,49 @@ class WhatsAppBot:
             if rid:
                 self.delete_notification(rid)
 
-    # /clients команда
+    def _send_price(self, chat_id: str, lang_code: str):
+        caption_map = {
+            'ru': "Отправляю актуальный прайс *{brand}*. Если нужен расчёт под вашу задачу — напишите нишу и сроки 🙂",
+            'kk': "*{brand}* прайсын жіберемін. Дәл есеп керек болса — сала мен мерзімдерді жазыңыз 🙂",
+            'en': "Sharing *{brand}* pricing file. For a tailored estimate, tell your niche and timeline 🙂"
+        }
+        caption = caption_map.get(lang_code, caption_map['en']).format(brand=self.brand)
+
+        if self.price_url:
+            ok = self.send_file_by_url(chat_id, self.price_url, self.price_filename, caption=caption)
+            if not ok:
+                # Фоллбек: дать ссылку текстом
+                self.send_message(chat_id, caption + "\n\n" + self.price_url)
+        else:
+            self.send_message(chat_id, caption + "\n\n(Файл прайса пока не подключён. Укажите PRICE_FILE_URL в .env)")
+
     def handle_clients_command(self, chat_id: str):
         try:
             filename = "client_records.json"
             if not os.path.exists(filename):
                 self.send_message(chat_id, "📭 Записей пока нет")
                 return
-
             with open(filename, 'r', encoding='utf-8') as f:
                 clients = json.load(f)
-
             if not clients:
                 self.send_message(chat_id, "📭 Записей пока нет")
                 return
-
             recent = list(clients.items())[-3:]
             response_lines = ["📋 Последние записи:\n"]
             for phone, data in recent:
                 response_lines.append(
-                    (
-                        f"📱 {phone}\n"
-                        f"👤 {data.get('name', 'Не указано')}\n"
-                        f"🏢 {data.get('company', 'Не указано')}\n"
-                        f"🤖 {data.get('bot_type', 'Не указано')}\n"
-                        f"📅 {data.get('recorded_at', '').split('T')[0]}\n"
-                    )
+                    (f"📱 {phone}\n"
+                     f"👤 {data.get('name', 'Не указано')}\n"
+                     f"🏢 {data.get('company', 'Не указано')}\n"
+                     f"🤖 {data.get('bot_type', 'Не указано')}\n"
+                     f"📅 {data.get('recorded_at', '').split('T')[0]}\n")
                 )
             self.send_message(chat_id, "\n".join(response_lines))
         except Exception as e:
             self.send_message(chat_id, f"Ошибка: {e}")
 
-    # Главный цикл
     def run(self):
         logger.info("🤖 Бот запущен!")
-
-        # Загружаем сохраненные языки
         self.load_user_languages()
 
         try:
@@ -787,6 +793,17 @@ class WhatsAppBot:
                 logger.error(f"Ошибка в главном цикле: {e}")
                 time.sleep(5)
 
+    # ---- ВСПОМОГАТЕЛЬНОЕ
+    def _check_price_link(self):
+        try:
+            if not self.price_url:
+                logger.warning("PRICE_FILE_URL не задан")
+                return
+            r = requests.head(self.price_url, timeout=8, allow_redirects=True)
+            logger.info(f"PRICE_FILE_URL check: status={r.status_code}, size={r.headers.get('Content-Length')}")
+        except Exception as e:
+            logger.warning(f"Проверка PRICE_FILE_URL упала: {e}")
+
 
 if __name__ == "__main__":
     try:
@@ -794,5 +811,4 @@ if __name__ == "__main__":
         bot.run()
     except Exception as e:
         print(f"Ошибка запуска: {e}")
-        print(
-            "Проверьте переменные окружения в .env файле: INSTANCE_ID, INSTANCE_TOKEN, OPENAI_API_KEY, (опц.) OPENAI_MODEL")
+        print("Проверьте переменные окружения: INSTANCE_ID, INSTANCE_TOKEN, OPENAI_API_KEY, BRAND_NAME, SUPPORT_PHONE, PRICE_FILE_URL, PRICE_FILE_NAME")
