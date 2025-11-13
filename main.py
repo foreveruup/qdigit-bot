@@ -40,8 +40,12 @@ class WhatsAppBot:
         # Хранилище выбранного языка для каждого чата
         self.user_language = {}  # {chat_id: 'ru'/'kk'/'en'}
 
-        # ✅ НОВОЕ: Память о состоянии формы
-        self.awaiting_form = {}  # {chat_id: True/False} — ожидаем ли заполнение формы
+        # ✅ СТАРОЕ: флаг ожидания формы (больше не используем для парсинга, но оставим для совместимости)
+        self.awaiting_form = {}  # {chat_id: True/False}
+
+        # ✅ НОВОЕ: пошаговая форма консультации
+        # {chat_id: {"step": 1..4, "data": {"name":..., "company":..., "phone":..., "bot_type":...}}}
+        self.form_state = {}
 
         # Системные промпты (RU/KK/EN) — всегда говорить от лица бренда и кратко
         self.system_prompts = {
@@ -282,6 +286,9 @@ RULES:
             del self.user_language[chat_id]
         if chat_id in self.awaiting_form:
             del self.awaiting_form[chat_id]
+        # ✅ чистим и пошаговую форму
+        if chat_id in self.form_state:
+            del self.form_state[chat_id]
         logger.info(f"История чата {chat_id} очищена")
 
     def send_message(self, chat_id: str, message: str) -> bool:
@@ -378,7 +385,8 @@ RULES:
     # === МАРШРУТИЗАЦИЯ ===
     def route_intent(self, text: str, lang_code: str, chat_id: str = None) -> Optional[str]:
         """
-        ✅ ОБНОВЛЕНО: Теперь принимает chat_id для управления состоянием формы
+        Маршрутизация по быстрым интентам (прайс, поддержка, консультация).
+        Для консультации теперь запускаем пошаговую форму.
         """
         t = (text or "").lower().strip()
 
@@ -412,43 +420,15 @@ RULES:
         }
 
         if any(kw in t for kw in consult_keywords.get(lang_code, [])):
-            # ✅ ВКЛЮЧАЕМ РЕЖИМ ОЖИДАНИЯ ФОРМЫ
+            # ✅ Запускаем пошаговую форму
             if chat_id:
-                self.awaiting_form[chat_id] = True
-
-            forms = {
-                'ru': (
-                    "📞 *Давайте согласуем консультацию!*\n\n"
-                    "Наш менеджер свяжется с вами, чтобы обсудить проект и предложить решение под вашу задачу.\n\n"
-                    "Пожалуйста, оставьте несколько данных *в одном сообщении*:\n\n"
-                    "👤 Имя\n"
-                    "🏢 Компания (или прочерк)\n"
-                    "📱 Телефон\n"
-                    "🧩 Кратко опишите задачу\n\n"
-                    "_После этого менеджер свяжется в ближайшее время 🙂_"
-                ),
-                'kk': (
-                    "📞 *Кеңесті келісейік!*\n\n"
-                    "Менеджер сізбен хабарласып, жобаңызды талқылайды және ең тиімді шешімді ұсынады.\n\n"
-                    "Келесі деректерді *бір хабарламада* қалдырыңыз:\n\n"
-                    "👤 Аты\n"
-                    "🏢 Компания (немесе сызықша)\n"
-                    "📱 Телефон\n"
-                    "🧩 Міндеттің қысқаша сипаттамасы\n\n"
-                    "_Біздің менеджер жақын арада хабарласады 🙂_"
-                ),
-                'en': (
-                    "📞 *Let's arrange your consultation!*\n\n"
-                    "Our manager will contact you to discuss your project and suggest the best solution.\n\n"
-                    "Please share the details *in one message*:\n\n"
-                    "👤 Name\n"
-                    "🏢 Company (or dash)\n"
-                    "📱 Phone\n"
-                    "🧩 Briefly describe your task\n\n"
-                    "_Our manager will reach out shortly 🙂_"
-                )
+                self.form_state[chat_id] = {"step": 1, "data": {}}
+            forms_start = {
+                'ru': "📞 *Давайте согласуем консультацию!*\n\nКак вас зовут? 🙂",
+                'kk': "📞 *Кеңесті келісейік!*\n\nАтыңыз кім? 🙂",
+                'en': "📞 *Let's arrange your consultation!*\n\nWhat is your name? 🙂",
             }
-            return forms.get(lang_code, forms['en'])
+            return forms_start.get(lang_code, forms_start['en'])
 
         return None
 
@@ -546,15 +526,15 @@ RULES:
         except Exception as e:
             logger.warning(f"Google Sheets недоступен или не настроен: {e}")
 
+    # === СТАРЫЙ extract_client_info можно оставить, но он больше не нужен для консультации ===
     def extract_client_info(self, text: str, lang_code: str) -> dict:
         """
-        Умное извлечение данных: работает и с метками (Имя:, Телефон:),
-        и с простым вводом строками (Имя / Компания / Телефон / Задача)
+        Оставлено для совместимости (если решишь где-то ещё использовать),
+        но пошаговая форма консультации работает без этого.
         """
         info = {}
         lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-        # 1) ПОДДЕРЖКА МЕТОК (старый вариант)
         keywords = {
             'ru': {'name': ['имя:', 'name:'], 'company': ['компания:', 'company:'],
                    'phone': ['телефон:', 'phone:'], 'task': ['задача:', 'задач']},
@@ -575,37 +555,143 @@ RULES:
             elif any(k in low for k in kw['task']):
                 info['bot_type'] = raw_line.split(':', 1)[1].strip()
 
-        # Если метки найдены — сразу возвращаем
         if info.get("name") and info.get("phone") and info.get("bot_type"):
             return info
 
-        # 2) АВТО-ПАРСИНГ БЕЗ МЕТОК
-        # Формат: имя / компания / телефон / задача (в любом порядке)
-        phone_pattern = re.compile(r'[\+\d\(\)\-\s]{7,}')  # Ищем телефоны
+        phone_pattern = re.compile(r'[\+\d\(\)\-\s]{7,}')
 
         for idx, line in enumerate(lines):
-            # Ищем телефон (цифры, +, пробелы, скобки)
             if phone_pattern.search(line) and not info.get('phone'):
                 info['phone'] = line
                 continue
 
-            # Первая строка без цифр = имя
             if not info.get('name') and not any(c.isdigit() for c in line):
                 info['name'] = line
                 continue
 
-            # Если есть имя и телефон, следующие строки = компания или задача
             if info.get('name') and info.get('phone'):
                 if not info.get('company'):
                     info['company'] = line
                 elif not info.get('bot_type'):
                     info['bot_type'] = line
 
-        # Если компания не указана, используем "—"
         if not info.get('company') and info.get('name'):
             info['company'] = "—"
 
         return info
+
+    # === НОВОЕ: обработка шагов формы консультации ===
+    def handle_form_step(self, chat_id: str, phone: str, message_text: str, lang_code: str):
+        """
+        Пошаговый опрос: Имя -> Компания (необязательно) -> Телефон -> Задача
+        """
+        state = self.form_state.get(chat_id)
+        if not state:
+            return
+
+        step = state.get("step", 1)
+        data = state.setdefault("data", {})
+
+        txt = message_text.strip()
+
+        # Шаг 1 — имя
+        if step == 1:
+            if len(txt) < 2:
+                msgs = {
+                    'ru': "Не расслышал имя, напишите, пожалуйста, как вас зовут 🙂",
+                    'kk': "Атыңызды толық жазыңызшы 🙂",
+                    'en': "I didn't catch your name, please write it again 🙂"
+                }
+                self.send_message(chat_id, msgs.get(lang_code, msgs['en']))
+                return
+
+            data["name"] = txt
+            state["step"] = 2
+
+            msgs = {
+                'ru': "Отлично, {name}! Теперь укажите *название вашей компании* "
+                      "(если нет — напишите прочерк или «нет»):",
+                'kk': "Жақсы, {name}! Енді *компания атауын* жазыңыз "
+                      "(егер жоқ болса — сызықша немесе «жоқ» деп жазыңыз):",
+                'en': "Great, {name}! Now please write your *company name* "
+                      "(if none — type a dash or 'none'):",
+            }
+            self.send_message(chat_id, msgs.get(lang_code, msgs['en']).format(name=data["name"]))
+            return
+
+        # Шаг 2 — компания (необязательно)
+        if step == 2:
+            if txt.lower() in {"", "-", "—", "нет", "no", "none", "жоқ"}:
+                data["company"] = "—"
+            else:
+                data["company"] = txt
+
+            state["step"] = 3
+
+            msgs = {
+                'ru': "Укажите, пожалуйста, ваш номер телефона 📱",
+                'kk': "Енді телефон нөміріңізді жазыңыз 📱",
+                'en': "Please share your phone number 📱",
+            }
+            self.send_message(chat_id, msgs.get(lang_code, msgs['en']))
+            return
+
+        # Шаг 3 — телефон
+        if step == 3:
+            # Простая проверка: хотя бы 7 цифр
+            digits = re.sub(r"\D", "", txt)
+            if len(digits) < 7:
+                msgs = {
+                    'ru': "Похоже, номер короткий. Пришлите, пожалуйста, номер полностью (с кодом):",
+                    'kk': "Нөмір қысқа сияқты. Толық нөмірді (кодымен бірге) жазыңызшы:",
+                    'en': "The number seems too short. Please send the full phone number (with code):",
+                }
+                self.send_message(chat_id, msgs.get(lang_code, msgs['en']))
+                return
+
+            data["phone"] = txt
+            state["step"] = 4
+
+            msgs = {
+                'ru': "Круто! Теперь кратко опишите задачу: что вам нужно — сайт, бот, автоматизация, маркетинг? 🙂",
+                'kk': "Керемет! Енді қысқаша жазыңыз: не қажет — сайт, бот, автоматтандыру, маркетинг? 🙂",
+                'en': "Nice! Now briefly describe your task: website, bot, automation, marketing, etc.? 🙂",
+            }
+            self.send_message(chat_id, msgs.get(lang_code, msgs['en']))
+            return
+
+        # Шаг 4 — задача
+        if step == 4:
+            data["bot_type"] = txt
+
+            # Сохраняем
+            if self.save_client_data(phone, data):
+                msgs = {
+                    'ru': ("✅ *Записал вас на бесплатную консультацию!*\n\n"
+                           f"👤 Имя: {data.get('name')}\n"
+                           f"🏢 Компания: {data.get('company')}\n"
+                           f"📱 Телефон: {data.get('phone')}\n"
+                           f"🧩 Задача: {data.get('bot_type')}\n\n"
+                           "Наш менеджер свяжется с вами в ближайшее время 🙌"),
+                    'kk': ("✅ *Сізді тегін кеңеске жаздым!*\n\n"
+                           f"👤 Аты: {data.get('name')}\n"
+                           f"🏢 Компания: {data.get('company')}\n"
+                           f"📱 Телефон: {data.get('phone')}\n"
+                           f"🧩 Міндет: {data.get('bot_type')}\n\n"
+                           "Менеджер жақын арада хабарласады 🙌"),
+                    'en': ("✅ *You're booked for a free consultation!*\n\n"
+                           f"👤 Name: {data.get('name')}\n"
+                           f"🏢 Company: {data.get('company')}\n"
+                           f"📱 Phone: {data.get('phone')}\n"
+                           f"🧩 Task: {data.get('bot_type')}\n\n"
+                           "Our manager will reach out soon 🙌")
+                }
+                self.send_message(chat_id, msgs.get(lang_code, msgs['en']))
+
+            # Чистим состояние формы
+            if chat_id in self.form_state:
+                del self.form_state[chat_id]
+            return
 
     # === ОБРАБОТКА СООБЩЕНИЙ ===
     def process_message(self, notification: dict):
@@ -697,70 +783,15 @@ RULES:
 
                 lang_code = self.user_language[chat_id]
 
-                # ✅ ПРОВЕРЯЕМ: ОЖИДАЕМ ЛИ ФОРМУ ОТ ЭТОГО ПОЛЬЗОВАТЕЛЯ?
-                if self.awaiting_form.get(chat_id, False):
-                    # Парсим данные
-                    client_info = self.extract_client_info(message_text, lang_code)
+                # ✅ ЕСЛИ ПОЛЬЗОВАТЕЛЬ СЕЙЧАС В ПРОЦЕССЕ ЗАПОЛНЕНИЯ ФОРМЫ — ОБРАБАТЫВАЕМ ШАГ
+                if chat_id in self.form_state:
+                    self.handle_form_step(chat_id, phone, message_text, lang_code)
+                    self.processed_messages.add(message_id)
+                    if receipt_id:
+                        self.delete_notification(receipt_id)
+                    return
 
-                    # Проверяем заполненность (только обязательные: имя, телефон, задача)
-                    need = []
-                    need_messages = {
-                        'ru': {'name': 'Имя', 'phone': 'Телефон', 'task': 'Задача'},
-                        'kk': {'name': 'Аты', 'phone': 'Телефон', 'task': 'Міндет'},
-                        'en': {'name': 'Name', 'phone': 'Phone', 'task': 'Task'}
-                    }
-                    nm = need_messages.get(lang_code, need_messages['en'])
-
-                    if not client_info.get('name'):
-                        need.append(nm['name'])
-                    if not client_info.get('phone'):
-                        need.append(nm['phone'])
-                    if not client_info.get('bot_type'):
-                        need.append(nm['task'])
-
-                    if need:
-                        ask_messages = {
-                            'ru': f"Почти всё! Не хватает: *{', '.join(need)}*.\n\nПришлите всё вместе одним сообщением:\nИмя / Компания / Телефон / Задача",
-                            'kk': f"Барлығы дерлік! Жетіспейді: *{', '.join(need)}*.\n\nБәрін бір хабарламада жіберіңіз:\nАты / Компания / Телефон / Міндет",
-                            'en': f"Almost there! Missing: *{', '.join(need)}*.\n\nSend everything in one message:\nName / Company / Phone / Task"
-                        }
-                        self.send_message(chat_id, ask_messages.get(lang_code, ask_messages['en']))
-                        self.processed_messages.add(message_id)
-                        if receipt_id:
-                            self.delete_notification(receipt_id)
-                        return
-
-                    # ✅ ВСЁ ЗАПОЛНЕНО — СОХРАНЯЕМ
-                    self.awaiting_form[chat_id] = False  # Отключаем режим ожидания
-
-                    if self.save_client_data(phone, client_info):
-                        success_messages = {
-                            'ru': ("✅ *Записал вас на бесплатную консультацию!*\n\n"
-                                   f"👤 Имя: {client_info.get('name')}\n"
-                                   f"🏢 Компания: {client_info.get('company')}\n"
-                                   f"📱 Телефон: {client_info.get('phone')}\n"
-                                   f"🧩 Задача: {client_info.get('bot_type')}\n\n"
-                                   "Наш менеджер свяжется с вами в ближайшее время 🙌"),
-                            'kk': ("✅ *Сізді тегін кеңеске жаздым!*\n\n"
-                                   f"👤 Аты: {client_info.get('name')}\n"
-                                   f"🏢 Компания: {client_info.get('company')}\n"
-                                   f"📱 Телефон: {client_info.get('phone')}\n"
-                                   f"🧩 Міндет: {client_info.get('bot_type')}\n\n"
-                                   "Менеджер жақын арада хабарласады 🙌"),
-                            'en': ("✅ *You're booked for a free consultation!*\n\n"
-                                   f"👤 Name: {client_info.get('name')}\n"
-                                   f"🏢 Company: {client_info.get('company')}\n"
-                                   f"📱 Phone: {client_info.get('phone')}\n"
-                                   f"🧩 Task: {client_info.get('bot_type')}\n\n"
-                                   "Our manager will reach out soon 🙌")
-                        }
-                        self.send_message(chat_id, success_messages.get(lang_code, success_messages['en']))
-                        self.processed_messages.add(message_id)
-                        if receipt_id:
-                            self.delete_notification(receipt_id)
-                        return
-
-                # === Быстрая маршрутизация (ДОБАВЛЕН chat_id)
+                # === Быстрая маршрутизация
                 quick = self.route_intent(message_text, lang_code, chat_id)
                 if quick:
                     if quick == "__INTENT_PRICE__":
@@ -807,42 +838,15 @@ RULES:
                     lang = self.user_language.get(chat_id, 'ru')
                     self._send_price(chat_id, lang)
                 elif selected_button == 'book_consult':
-                    # ✅ ВКЛЮЧАЕМ РЕЖИМ ОЖИДАНИЯ ФОРМЫ
-                    self.awaiting_form[chat_id] = True
-
-                    consult_forms = {
-                        'ru': (
-                            "📞 *Давайте согласуем консультацию!*\n\n"
-                            "Наш менеджер свяжется с вами, чтобы обсудить проект и предложить решение под вашу задачу.\n\n"
-                            "Пожалуйста, оставьте несколько данных *в одном сообщении*:\n\n"
-                            "👤 Имя\n"
-                            "🏢 Компания (или прочерк)\n"
-                            "📱 Телефон\n"
-                            "🧩 Кратко опишите задачу\n\n"
-                            "_После этого менеджер свяжется в ближайшее время 🙂_"
-                        ),
-                        'kk': (
-                            "📞 *Кеңесті келісейік!*\n\n"
-                            "Менеджер сізбен хабарласып, жобаңызды талқылайды және ең тиімді шешімді ұсынады.\n\n"
-                            "Келесі деректерді *бір хабарламада* қалдырыңыз:\n\n"
-                            "👤 Аты\n"
-                            "🏢 Компания (немесе сызықша)\n"
-                            "📱 Телефон\n"
-                            "🧩 Міндеттің қысқаша сипаттамасы\n\n"
-                            "_Біздің менеджер жақын арада хабарласады 🙂_"
-                        ),
-                        'en': (
-                            "📞 *Let's arrange your consultation!*\n\n"
-                            "Our manager will contact you to discuss your project and suggest the best solution.\n\n"
-                            "Please share the details *in one message*:\n\n"
-                            "👤 Name\n"
-                            "🏢 Company (or dash)\n"
-                            "📱 Phone\n"
-                            "🧩 Briefly describe your task\n\n"
-                            "_Our manager will reach out shortly 🙂_"
-                        )
+                    # ✅ Запускаем пошаговую форму с кнопки
+                    lang = self.user_language.get(chat_id, 'ru')
+                    self.form_state[chat_id] = {"step": 1, "data": {}}
+                    forms_start = {
+                        'ru': "📞 *Давайте согласуем консультацию!*\n\nКак вас зовут? 🙂",
+                        'kk': "📞 *Кеңесті келісейік!*\n\nАтыңыз кім? 🙂",
+                        'en': "📞 *Let's arrange your consultation!*\n\nWhat is your name? 🙂",
                     }
-                    self.send_message(chat_id, consult_forms.get(self.user_language.get(chat_id, 'ru')))
+                    self.send_message(chat_id, forms_start.get(lang, forms_start['en']))
                 elif selected_button == 'short_services':
                     brief = {
                         'ru': "Наши основные услуги:\n• Чат-боты (WA/TG) и интеграции\n• Автоматизация процессов\n• Сайты/лендинги\n• Аналитика и дашборды\n• AI-ассистенты\n\nЧто нужно именно вам? 🙂",
