@@ -173,7 +173,7 @@ RULES:
         }
 
         try:
-            r = requests.post(url, json=payload, timeout=10)
+            r = requests.post(url, json=payload, timeout=30)
             ok = r.status_code == 200
             if not ok:
                 logger.error(f"Ошибка send_welcome_with_actions: {r.status_code} {r.text}")
