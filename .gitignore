@@ -1,3 +1,6 @@
 .env
 broadcast.py
 dent-clients.xslx
+.venv
+test.py
+__pycache__/
