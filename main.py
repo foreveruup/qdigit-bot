@@ -40,12 +40,17 @@ class WhatsAppBot:
         # Хранилище выбранного языка для каждого чата
         self.user_language = {}  # {chat_id: 'ru'/'kk'/'en'}
 
-        # ✅ СТАРОЕ: флаг ожидания формы (больше не используем для парсинга, но оставим для совместимости)
+        # СТАРОЕ: флаг ожидания формы (оставлен для совместимости)
         self.awaiting_form = {}  # {chat_id: True/False}
 
-        # ✅ НОВОЕ: пошаговая форма консультации
+        # НОВОЕ: пошаговая форма консультации
         # {chat_id: {"step": 1..4, "data": {"name":..., "company":..., "phone":..., "bot_type":...}}}
         self.form_state = {}
+
+        # Ручной режим: когда менеджер ведёт диалог
+        # {chat_id: timestamp_включения}
+        self.manual_mode = {}
+        self.manual_mode_ttl = int(os.environ.get("MANUAL_MODE_TTL", "900"))  # 15 мин по умолчанию
 
         # Системные промпты (RU/KK/EN) — всегда говорить от лица бренда и кратко
         self.system_prompts = {
@@ -111,7 +116,7 @@ RULES:
         self.history = {}
         self.last_reply = {}
 
-        # ==== (опционально) Быстрая самопроверка ссылки прайса
+        # Быстрая самопроверка ссылки прайса
         self._check_price_link()
 
     # === ВЫБОР ЯЗЫКА ===
@@ -126,6 +131,27 @@ RULES:
         all_greetings = ru_greetings | kk_greetings | en_greetings
         base = t.replace('!', '').replace(',', '').strip()
         return t in all_greetings or base in all_greetings
+
+    # === РУЧНОЙ РЕЖИМ (менеджер) ===
+
+    def is_manual_mode(self, chat_id: str) -> bool:
+        ts = self.manual_mode.get(chat_id)
+        if not ts:
+            return False
+        if time.time() - ts > self.manual_mode_ttl:
+            self.manual_mode.pop(chat_id, None)
+            logger.info(f"⏱ Ручной режим для {chat_id} истёк по TTL")
+            return False
+        return True
+
+    def enable_manual_mode(self, chat_id: str):
+        self.manual_mode[chat_id] = time.time()
+        logger.info(f"🧑‍💼 Включён ручной режим для чата {chat_id}")
+
+    def disable_manual_mode(self, chat_id: str):
+        if chat_id in self.manual_mode:
+            self.manual_mode.pop(chat_id, None)
+            logger.info(f"🤖 Ручной режим выключен, бот снова активен в чате {chat_id}")
 
     # === ЕДИНОЕ ПРИВЕТСТВИЕ + КНОПКИ (после выбора языка) ===
     def send_welcome_with_actions(self, chat_id: str, lang_code: str) -> bool:
@@ -286,9 +312,10 @@ RULES:
             del self.user_language[chat_id]
         if chat_id in self.awaiting_form:
             del self.awaiting_form[chat_id]
-        # ✅ чистим и пошаговую форму
         if chat_id in self.form_state:
             del self.form_state[chat_id]
+        if chat_id in self.manual_mode:
+            del self.manual_mode[chat_id]
         logger.info(f"История чата {chat_id} очищена")
 
     def send_message(self, chat_id: str, message: str) -> bool:
@@ -386,7 +413,7 @@ RULES:
     def route_intent(self, text: str, lang_code: str, chat_id: str = None) -> Optional[str]:
         """
         Маршрутизация по быстрым интентам (прайс, поддержка, консультация).
-        Для консультации теперь запускаем пошаговую форму.
+        Для консультации запускаем пошаговую форму.
         """
         t = (text or "").lower().strip()
 
@@ -420,7 +447,6 @@ RULES:
         }
 
         if any(kw in t for kw in consult_keywords.get(lang_code, [])):
-            # ✅ Запускаем пошаговую форму
             if chat_id:
                 self.form_state[chat_id] = {"step": 1, "data": {}}
             forms_start = {
@@ -434,7 +460,7 @@ RULES:
 
     # === СОХРАНЕНИЕ КЛИЕНТА ===
     def save_client_data(self, phone: str, data: dict) -> bool:
-        """Локально JSON + (опционально) запись в Google Sheets/CSV (см. ниже)."""
+        """Локально JSON + (опционально) запись в Google Sheets/CSV."""
         try:
             filename = "client_records.json"
             if os.path.exists(filename):
@@ -448,7 +474,6 @@ RULES:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(clients, f, ensure_ascii=False, indent=2)
 
-            # Доп. канал — Google Sheets / CSV
             self._persist_to_sheets_and_csv(clients[phone])
 
             logger.info(f"Записан клиент {phone}: {data.get('name', 'Без имени')}")
@@ -459,12 +484,15 @@ RULES:
 
     def _persist_to_sheets_and_csv(self, row: dict):
         """Опционально: отправка в Google Sheets (если настроено), + append в CSV."""
-        # CSV (просто и полезно для Excel)
+        # CSV
         try:
             import csv
             csv_exists = os.path.exists("client_records.csv")
             with open("client_records.csv", "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=["recorded_at", "name", "company", "phone", "bot_type", "status"])
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["recorded_at", "name", "company", "phone", "bot_type", "status"]
+                )
                 if not csv_exists:
                     writer.writeheader()
                 writer.writerow({
@@ -478,7 +506,7 @@ RULES:
         except Exception as e:
             logger.warning(f"Ошибка записи в CSV: {e}")
 
-        # Google Sheets (если заданы переменные)
+        # Google Sheets
         try:
             g_enable = os.environ.get("GOOGLE_SHEETS_ENABLED", "").lower() == "true"
             creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -498,20 +526,17 @@ RULES:
                 gc = gspread.authorize(credentials)
                 sh = gc.open(sheet_name)
 
-                # Создать лист, если его нет
                 if worksheet not in [w.title for w in sh.worksheets()]:
                     ws = sh.add_worksheet(title=worksheet, rows=1000, cols=10)
                 else:
                     ws = sh.worksheet(worksheet)
 
-                # Заголовки (всегда на первой строке)
                 headers = ["Дата", "Имя", "Компания", "Телефон", "Задача", "Источник", "Статус"]
                 first_row = ws.row_values(1)
                 if not first_row or first_row != headers:
                     ws.update("A1:G1", [headers])
                     logger.info("🧾 Заголовок таблицы обновлён")
 
-                # Добавляем новую строку
                 ws.append_row([
                     datetime.now().strftime("%d.%m.%Y %H:%M"),
                     row.get("name"),
@@ -526,12 +551,8 @@ RULES:
         except Exception as e:
             logger.warning(f"Google Sheets недоступен или не настроен: {e}")
 
-    # === СТАРЫЙ extract_client_info можно оставить, но он больше не нужен для консультации ===
+    # === СТАРЫЙ extract_client_info (на будущее) ===
     def extract_client_info(self, text: str, lang_code: str) -> dict:
-        """
-        Оставлено для совместимости (если решишь где-то ещё использовать),
-        но пошаговая форма консультации работает без этого.
-        """
         info = {}
         lines = [l.strip() for l in text.split("\n") if l.strip()]
 
@@ -638,7 +659,6 @@ RULES:
 
         # Шаг 3 — телефон
         if step == 3:
-            # Простая проверка: хотя бы 7 цифр
             digits = re.sub(r"\D", "", txt)
             if len(digits) < 7:
                 msgs = {
@@ -664,7 +684,6 @@ RULES:
         if step == 4:
             data["bot_type"] = txt
 
-            # Сохраняем
             if self.save_client_data(phone, data):
                 msgs = {
                     'ru': ("✅ *Записал вас на бесплатную консультацию!*\n\n"
@@ -688,49 +707,107 @@ RULES:
                 }
                 self.send_message(chat_id, msgs.get(lang_code, msgs['en']))
 
-            # Чистим состояние формы
             if chat_id in self.form_state:
                 del self.form_state[chat_id]
             return
 
-    # === ОБРАБОТКА СООБЩЕНИЙ ===
+    # === ОБРАБОТКА СООБЩЕНИЙ (с учётом SWE001 и ручного режима) ===
     def process_message(self, notification: dict):
         try:
             if not notification:
                 return
             receipt_id = notification.get('receiptId')
-            body = notification.get('body', {})
+            body = notification.get('body', {}) or {}
             if not body:
                 return
 
             type_webhook = body.get('typeWebhook', '')
             message_id = body.get('idMessage')
+            message_data = body.get('messageData', {}) or {}
+            sender_data = body.get('senderData', {}) or {}
+            chat_id = sender_data.get('chatId', '')
+            phone = sender_data.get('sender', '')
 
             if message_id and message_id in self.processed_messages:
                 if receipt_id:
                     self.delete_notification(receipt_id)
                 return
 
-            if type_webhook != 'incomingMessageReceived':
+            # === Исходящие сообщения (менеджер) ===
+            if type_webhook == 'outgoingMessageReceived':
+                raw_text = self._extract_text(message_data)
+                message_text = self._normalize_text(raw_text)
+                logger.info(f"📤 Исходящее сообщение менеджера в чат {chat_id}: {message_text!r}")
+
+                # Команды управления ботом
+                if message_text.strip() == '/bot_off':
+                    self.enable_manual_mode(chat_id)
+                    logger.info(f"🧑‍💼 Менеджер включил ручной режим для {chat_id} (бот молчит)")
+                    self.processed_messages.add(message_id)
+                    if receipt_id:
+                        self.delete_notification(receipt_id)
+                    return
+
+                if message_text.strip() == '/bot_on':
+                    self.disable_manual_mode(chat_id)
+                    logger.info(f"🤖 Менеджер отключил ручной режим, бот снова активен в чате {chat_id}")
+                    self.processed_messages.add(message_id)
+                    if receipt_id:
+                        self.delete_notification(receipt_id)
+                    return
+
+                # Любое другое сообщение менеджера = вмешательство → включаем ручной режим
+                if chat_id:
+                    self.enable_manual_mode(chat_id)
+
+                self.processed_messages.add(message_id)
                 if receipt_id:
                     self.delete_notification(receipt_id)
                 return
 
-            message_data = body.get('messageData', {})
-            sender_data = body.get('senderData', {})
-            chat_id = sender_data.get('chatId', '')
-            phone = sender_data.get('sender', '')
+            # Обрабатываем только входящие от клиента
+            if type_webhook != 'incomingMessageReceived':
+                if receipt_id:
+                    self.delete_notification(receipt_id)
+                return
 
             if not chat_id:
                 if receipt_id:
                     self.delete_notification(receipt_id)
                 return
 
+            # Если чат в ручном режиме — бот молчит
+            if self.is_manual_mode(chat_id):
+                logger.info(f"⏸️ Чат {chat_id} в ручном режиме, бот не отвечает")
+                self.processed_messages.add(message_id)
+                if receipt_id:
+                    self.delete_notification(receipt_id)
+                return
+
+            # Текст или extendedText
             if message_data.get('typeMessage') in ('textMessage', 'extendedTextMessage') or \
                     ('textMessageData' in message_data or 'extendedTextMessageData' in message_data):
 
                 raw_text = self._extract_text(message_data)
                 message_text = self._normalize_text(raw_text)
+
+                # Спец-случай SWE001
+                if message_text.strip() == "{{SWE001}}":
+                    lang_code = self.user_language.get(chat_id, 'ru')
+                    msg_swe = {
+                        'ru': ("Кажется, WhatsApp пока не прислал текст вашего сообщения (ошибка SWE001). "
+                               "Пожалуйста, отправьте его ещё раз обычным текстом 🙏"),
+                        'kk': ("Көріп тұрғанымша, WhatsApp хабарламаның мәтінін әлі жібермеді (SWE001 қатесі). "
+                               "Хабарламаны қайтадан мәтін түрінде жібере аласыз ба? 🙏"),
+                        'en': ("Looks like WhatsApp hasn't delivered the text of your message yet (SWE001 error). "
+                               "Please resend your message as plain text 🙏"),
+                    }
+                    self.send_message(chat_id, msg_swe.get(lang_code, msg_swe['en']))
+                    logger.warning(f"⚠️ SWE001 в чате {chat_id}, попросили клиента продублировать сообщение")
+                    self.processed_messages.add(message_id)
+                    if receipt_id:
+                        self.delete_notification(receipt_id)
+                    return
 
                 if not message_text:
                     logger.warning(f"Пустой текст при входящем сообщении. type={message_data.get('typeMessage')}")
@@ -745,7 +822,7 @@ RULES:
 
                 logger.info(f"📩 Текстовое сообщение от {phone}: {message_text}")
 
-                # === ADMIN
+                # ADMIN
                 if message_text.strip().startswith('/clients'):
                     if phone.replace('+', '') in {"77776463138"}:
                         self.handle_clients_command(chat_id)
@@ -765,7 +842,7 @@ RULES:
                         self.delete_notification(receipt_id)
                     return
 
-                # === ЯЗЫК
+                # ЯЗЫК
                 if chat_id not in self.user_language:
                     if message_text.strip() in ['1', '2', '3']:
                         lang_map = {'1': 'ru', '2': 'kk', '3': 'en'}
@@ -783,7 +860,7 @@ RULES:
 
                 lang_code = self.user_language[chat_id]
 
-                # ✅ ЕСЛИ ПОЛЬЗОВАТЕЛЬ СЕЙЧАС В ПРОЦЕССЕ ЗАПОЛНЕНИЯ ФОРМЫ — ОБРАБАТЫВАЕМ ШАГ
+                # Пошаговая форма консультации
                 if chat_id in self.form_state:
                     self.handle_form_step(chat_id, phone, message_text, lang_code)
                     self.processed_messages.add(message_id)
@@ -791,7 +868,7 @@ RULES:
                         self.delete_notification(receipt_id)
                     return
 
-                # === Быстрая маршрутизация
+                # Быстрая маршрутизация
                 quick = self.route_intent(message_text, lang_code, chat_id)
                 if quick:
                     if quick == "__INTENT_PRICE__":
@@ -803,7 +880,7 @@ RULES:
                         self.delete_notification(receipt_id)
                     return
 
-                # === Ответ через GPT
+                # GPT
                 response = self.get_openai_response(chat_id, message_text)
                 self.send_message(chat_id, response)
 
@@ -812,9 +889,17 @@ RULES:
                     self.delete_notification(receipt_id)
                 return
 
-            # === КНОПКИ
+            # КНОПКИ
             elif message_data.get('typeMessage') == 'interactiveButtonsResponse':
-                reply_data = message_data.get('interactiveButtonsResponse', {})
+                # Если менеджер уже вмешался — игнорируем и кнопки тоже
+                if self.is_manual_mode(chat_id):
+                    logger.info(f"⏸️ Чат {chat_id} в ручном режиме (interactiveButtonsResponse игнорируется)")
+                    self.processed_messages.add(message_id)
+                    if receipt_id:
+                        self.delete_notification(receipt_id)
+                    return
+
+                reply_data = message_data.get('interactiveButtonsResponse', {}) or {}
                 selected_button = reply_data.get('selectedButtonId', '')
                 selected_text = reply_data.get('selectedButtonText', '')
                 if not selected_button:
@@ -838,7 +923,6 @@ RULES:
                     lang = self.user_language.get(chat_id, 'ru')
                     self._send_price(chat_id, lang)
                 elif selected_button == 'book_consult':
-                    # ✅ Запускаем пошаговую форму с кнопки
                     lang = self.user_language.get(chat_id, 'ru')
                     self.form_state[chat_id] = {"step": 1, "data": {}}
                     forms_start = {
